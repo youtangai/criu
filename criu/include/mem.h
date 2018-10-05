@@ -22,6 +22,7 @@ struct mem_dump_ctl {
 };
 
 extern bool vma_has_guard_gap_hidden(struct vma_area *vma);
+extern int task_reset_dirty_track(int pid);
 extern bool page_is_zero(u64 pme);
 extern bool page_in_parent(bool dirty);
 extern int prepare_mm_pid(struct pstree_item *i);

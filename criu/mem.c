@@ -34,7 +34,7 @@
 #include "protobuf.h"
 #include "images/pagemap.pb-c.h"
 
-static int task_reset_dirty_track(int pid)
+int task_reset_dirty_track(int pid)
 {
 	int ret;
 
