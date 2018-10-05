@@ -2182,6 +2182,11 @@ skip_ns_bouncing:
 	if (ret < 0)
 		goto out_kill;
 
+	for_each_pstree_item(item) {
+		if (task_reset_dirty_track(item->pid->real) < 0)
+			goto out_kill;
+	}
+
 	ret = stop_usernsd();
 	if (ret < 0)
 		goto out_kill;
