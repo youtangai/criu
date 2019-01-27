@@ -294,7 +294,7 @@ static int detect_pid_reuse(struct pstree_item *item,
 			    struct proc_pid_stat* pps,
 			    InventoryEntry *parent_ie)
 {
-	unsigned long long dump_ticks;
+	// unsigned long long dump_ticks;
 	struct proc_pid_stat pps_buf;
 	unsigned long long tps; /* ticks per second */
 	int ret;
@@ -318,15 +318,15 @@ static int detect_pid_reuse(struct pstree_item *item,
 			return -1;
 	}
 
-	dump_ticks = parent_ie->dump_uptime/(USEC_PER_SEC/tps);
+	// dump_ticks = parent_ie->dump_uptime/(USEC_PER_SEC/tps);
 
-	if (pps->start_time >= dump_ticks) {
-		/* Print "*" if unsure */
-		pr_warn("Pid reuse%s detected for pid %d\n",
-			pps->start_time == dump_ticks ? "*" : "",
-			item->pid->real);
-		return 1;
-	}
+	// if (pps->start_time >= dump_ticks) {
+	// 	/* Print "*" if unsure */
+	// 	pr_warn("Pid reuse%s detected for pid %d\n",
+	// 		pps->start_time == dump_ticks ? "*" : "",
+	// 		item->pid->real);
+	// 	return 1;
+	// }
 	return 0;
 }
 
