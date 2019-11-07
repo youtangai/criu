@@ -333,10 +333,10 @@ err:
 	return ret;
 }
 
-static int prepare_pstree_for_shell_job(void)
+static int prepare_pstree_for_shell_job(pid_t pid)
 {
-	pid_t current_sid = getsid(getpid());
-	pid_t current_gid = getpgid(getpid());
+	pid_t current_sid = getsid(pid);
+	pid_t current_gid = getpgid(pid);
 
 	struct pstree_item *pi;
 
@@ -367,22 +367,31 @@ static int prepare_pstree_for_shell_job(void)
 	 */
 
 	old_sid = root_item->sid;
-	old_gid = root_item->pgid;
 
-	pr_info("Migrating process tree (GID %d->%d SID %d->%d)\n",
-		old_gid, current_gid, old_sid, current_sid);
+	pr_info("Migrating process tree (SID %d->%d)\n",
+		old_sid, current_sid);
 
 	for_each_pstree_item(pi) {
-		if (pi->pgid == old_gid)
-			pi->pgid = current_gid;
 		if (pi->sid == old_sid)
 			pi->sid = current_sid;
 	}
 
-	if (lookup_create_item(current_sid) == NULL)
-		return -1;
-	if (lookup_create_item(current_gid) == NULL)
-		return -1;
+	old_gid = root_item->pgid;
+	if (old_gid != vpid(root_item)) {
+		if (lookup_create_item(current_sid) == NULL)
+			return -1;
+
+		pr_info("Migrating process tree (GID %d->%d)\n",
+			old_gid, current_gid);
+
+		for_each_pstree_item(pi) {
+			if (pi->pgid == old_gid)
+				pi->pgid = current_gid;
+		}
+
+		if (lookup_create_item(current_gid) == NULL)
+			return -1;
+	}
 
 	return 0;
 }
@@ -625,12 +634,12 @@ static int get_free_pid()
 	return -1;
 }
 
-static int prepare_pstree_ids(void)
+static int prepare_pstree_ids(pid_t pid)
 {
 	struct pstree_item *item, *child, *helper, *tmp;
 	LIST_HEAD(helpers);
 
-	pid_t current_pgid = getpgid(getpid());
+	pid_t current_pgid = getpgid(pid);
 
 	/*
 	 * Some task can be reparented to init. A helper task should be added
@@ -910,7 +919,7 @@ static int prepare_pstree_kobj_ids(void)
 int prepare_pstree(void)
 {
 	int ret;
-	pid_t pid_max = 0, kpid_max = 0;
+	pid_t pid_max = 0, kpid_max = 0, pid;
 	int fd;
 	char buf[21];
 
@@ -945,12 +954,14 @@ int prepare_pstree(void)
 		}
 	}
 
+	pid = getpid();
+
 	if (!ret)
 		/*
 		 * Shell job may inherit sid/pgid from the current
 		 * shell, not from image. Set things up for this.
 		 */
-		ret = prepare_pstree_for_shell_job();
+		ret = prepare_pstree_for_shell_job(pid);
 	if (!ret)
 		/*
 		 * Walk the collected tree and prepare for restoring
@@ -962,7 +973,7 @@ int prepare_pstree(void)
 		 * Session/Group leaders might be dead. Need to fix
 		 * pstree with properly injected helper tasks.
 		 */
-		ret = prepare_pstree_ids();
+		ret = prepare_pstree_ids(pid);
 
 	return ret;
 }

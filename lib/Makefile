@@ -1,11 +1,12 @@
 CRIU_SO			:= libcriu.so
-UAPI_HEADERS		:= lib/c/criu.h images/rpc.proto
+CRIU_A			:= libcriu.a
+UAPI_HEADERS		:= lib/c/criu.h images/rpc.proto criu/include/version.h
 
 #
 # File to keep track of files installed by setup.py
 CRIT_SETUP_FILES	:= lib/.crit-setup.files
 
-all-y	+= lib-c lib-py
+all-y	+= lib-c lib-a lib-py
 
 #
 # C language bindings.
@@ -19,8 +20,12 @@ ldflags-so		+= -lprotobuf-c
 lib/c/$(CRIU_SO): lib/c/built-in.o
 	$(call msg-link, $@)
 	$(Q) $(CC) -shared $(cflags-so) -o $@ $^ $(ldflags-so) $(LDFLAGS)
+lib/c/$(CRIU_A): lib/c/built-in.o
+	$(call msg-link, $@)
+	$(Q) $(AR) rcs $@ $^
 lib-c: lib/c/$(CRIU_SO)
-.PHONY: lib-c
+lib-a: lib/c/$(CRIU_A)
+.PHONY: lib-c lib-a
 
 #
 # Python bindings.
@@ -37,15 +42,16 @@ clean-lib:
 	$(Q) $(MAKE) $(build)=lib/py clean
 .PHONY: clean-lib
 clean: clean-lib
-cleanup-y	+= lib/c/$(CRIU_SO) lib/c/criu.pc
+cleanup-y	+= lib/c/$(CRIU_SO) lib/c/$(CRIU_A) lib/c/criu.pc
 mrproper: clean
 
-install: lib-c lib-py crit/crit lib/c/criu.pc.in
+install: lib-c lib-a lib-py crit/crit lib/c/criu.pc.in
 	$(E) "  INSTALL " lib
 	$(Q) mkdir -p $(DESTDIR)$(LIBDIR)
 	$(Q) install -m 755 lib/c/$(CRIU_SO) $(DESTDIR)$(LIBDIR)/$(CRIU_SO).$(CRIU_SO_VERSION_MAJOR).$(CRIU_SO_VERSION_MINOR)
 	$(Q) ln -fns $(CRIU_SO).$(CRIU_SO_VERSION_MAJOR).$(CRIU_SO_VERSION_MINOR) $(DESTDIR)$(LIBDIR)/$(CRIU_SO).$(CRIU_SO_VERSION_MAJOR)
 	$(Q) ln -fns $(CRIU_SO).$(CRIU_SO_VERSION_MAJOR).$(CRIU_SO_VERSION_MINOR) $(DESTDIR)$(LIBDIR)/$(CRIU_SO)
+	$(Q) install -m 755 lib/c/$(CRIU_A) $(DESTDIR)$(LIBDIR)/$(CRIU_A)
 	$(Q) mkdir -p $(DESTDIR)$(INCLUDEDIR)/criu/
 	$(Q) install -m 644 $(UAPI_HEADERS) $(DESTDIR)$(INCLUDEDIR)/criu/
 	$(E) "  INSTALL " pkgconfig/criu.pc
@@ -60,6 +66,7 @@ uninstall:
 	$(E) " UNINSTALL" $(CRIU_SO)
 	$(Q) $(RM) $(addprefix $(DESTDIR)$(LIBDIR)/,$(CRIU_SO).$(CRIU_SO_VERSION_MAJOR))
 	$(Q) $(RM) $(addprefix $(DESTDIR)$(LIBDIR)/,$(CRIU_SO))
+	$(Q) $(RM) $(addprefix $(DESTDIR)$(LIBDIR)/,$(CRIU_A))
 	$(Q) $(RM) $(addprefix $(DESTDIR)$(LIBDIR)/,$(CRIU_SO).$(CRIU_SO_VERSION_MAJOR).$(CRIU_SO_VERSION_MINOR))
 	$(Q) $(RM) $(addprefix $(DESTDIR)$(INCLUDEDIR)/criu/,$(notdir $(UAPI_HEADERS)))
 	$(E) " UNINSTALL" pkgconfig/criu.pc

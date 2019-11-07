@@ -26,8 +26,8 @@ Pages worth starting with are:
 - [Examples of more advanced usage](https://criu.org/Category:HOWTO)
 - Troubleshooting can be hard, some help can be found [here](https://criu.org/When_C/R_fails), [here](https://criu.org/What_cannot_be_checkpointed) and [here](https://criu.org/FAQ)
 
-### A video tour on basic CRIU features
-[![CRIU introduction](https://asciinema.org/a/7fnt2prsumvxiwf3ng61fgct3.png)](https://asciinema.org/a/7fnt2prsumvxiwf3ng61fgct3)
+### Checkpoint and restore of simple loop process 
+[<p align="center"><img src="https://asciinema.org/a/232445.png" width="572px" height="412px"/></p>](https://asciinema.org/a/232445)
 
 ## Advanced features
 
@@ -39,7 +39,9 @@ injection and libsoccr for TCP connections checkpoint-restore.
 
 True [live migration](https://criu.org/Live_migration) using CRIU is possible, but doing
 all the steps by hands might be complicated. The [phaul sub-project](https://criu.org/P.Haul)
-provides a Go library that encapsulates most of the complexity.
+provides a Go library that encapsulates most of the complexity. This library and the Go bindings
+for CRIU are stored in the [go-criu](https://github.com/checkpoint-restore/go-criu) repository.
+
 
 ### Parasite code injection
 
@@ -61,8 +63,8 @@ Linux kernel supporting checkpoint and restore for all the features it provides.
 looking for contributors of all kinds -- feedback, bug reports, testing, coding, writing, etc.
 Here are some useful hints to get involved.
 
-* We have both -- [very simple](https://github.com/xemul/criu/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) and [more sophisticated](https://github.com/xemul/criu/issues?q=is%3Aissue+is%3Aopen+label%3A%22new+feature%22) coding tasks;
-* CRIU does need [extensive testing](https://github.com/xemul/criu/issues?q=is%3Aissue+is%3Aopen+label%3Atesting);
+* We have both -- [very simple](https://checkpoint-restore/criu/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement) and [more sophisticated](https://checkpoint-restore/criu/issues?q=is%3Aissue+is%3Aopen+label%3A%22new+feature%22) coding tasks;
+* CRIU does need [extensive testing](https://checkpoint-restore/criu/issues?q=is%3Aissue+is%3Aopen+label%3Atesting);
 * Documentation is always hard, we have [some information](https://criu.org/Category:Empty_articles) that is to be extracted from people's heads into wiki pages as well as [some texts](https://criu.org/Category:Editor_help_needed) that all need to be converted into useful articles;
 * Feedback is expected on the github issues page and on the [mailing list](https://lists.openvz.org/mailman/listinfo/criu);
 * For historical reasons we do not accept PRs, instead [patches are welcome](http://criu.org/How_to_submit_patches);

@@ -46,13 +46,13 @@ static unsigned int join_ns_flags;
 
 int check_namespace_opts(void)
 {
-	errno = 22;
+	errno = EINVAL;
 	if (join_ns_flags & opts.empty_ns) {
 		pr_err("Conflicting flags: --join-ns and --empty-ns\n");
 		return -1;
 	}
 	if (join_ns_flags & CLONE_NEWUSER)
-		pr_warn("join-ns with user-namespace is not fully tested and dangerous");
+		pr_warn("join-ns with user-namespace is not fully tested and dangerous\n");
 
 	errno = 0;
 	return 0;
@@ -71,7 +71,7 @@ static int check_int_str(char *str)
 		return 0;
 	}
 
-	errno = 22;
+	errno = EINVAL;
 	val = strtol(str, &endptr, 10);
 	if ((errno == ERANGE) || (endptr == str)
 			|| (*endptr != '\0')
@@ -857,33 +857,32 @@ static int check_user_ns(int pid)
 		struct __user_cap_header_struct hdr;
 		uid_t uid;
 		gid_t gid;
-		int i;
 
 		uid = host_uid(0);
 		gid = host_gid(0);
 		if (uid == INVALID_ID || gid == INVALID_ID) {
 			pr_err("Unable to convert uid or gid\n");
-			return -1;
+			exit(1);
 		}
 
 		if (prctl(PR_SET_KEEPCAPS, 1)) {
 			pr_perror("Unable to set PR_SET_KEEPCAPS");
-			return -1;
+			exit(1);
 		}
 
 		if (setresgid(gid, gid, gid)) {
 			pr_perror("Unable to set group ID");
-			return -1;
+			exit(1);
 		}
 
 		if (setgroups(0, NULL) < 0) {
 			pr_perror("Unable to drop supplementary groups");
-			return -1;
+			exit(1);
 		}
 
 		if (setresuid(uid, uid, uid)) {
 			pr_perror("Unable to set user ID");
-			return -1;
+			exit(1);
 		}
 
 		hdr.version = _LINUX_CAPABILITY_VERSION_3;
@@ -891,18 +890,14 @@ static int check_user_ns(int pid)
 
 		if (capget(&hdr, data) < 0) {
 			pr_perror("capget");
-			return -1;
+			exit(1);
 		}
 		data[0].effective = data[0].permitted;
 		data[1].effective = data[1].permitted;
 		if (capset(&hdr, data) < 0) {
 			pr_perror("capset");
-			return -1;
+			exit(1);
 		}
-
-		close_old_fds();
-		for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++)
-			close_service_fd(i);
 
 		/*
 		 * Check that we are able to enter into other namespaces
@@ -911,20 +906,20 @@ static int check_user_ns(int pid)
 		 */
 
 		if (switch_ns(pid, &user_ns_desc, NULL))
-			exit(-1);
+			exit(1);
 
 		if ((root_ns_mask & CLONE_NEWNET) &&
 		    switch_ns(pid, &net_ns_desc, NULL))
-			exit(-1);
+			exit(1);
 		if ((root_ns_mask & CLONE_NEWUTS) &&
 		    switch_ns(pid, &uts_ns_desc, NULL))
-			exit(-1);
+			exit(1);
 		if ((root_ns_mask & CLONE_NEWIPC) &&
 		    switch_ns(pid, &ipc_ns_desc, NULL))
-			exit(-1);
+			exit(1);
 		if ((root_ns_mask & CLONE_NEWNS) &&
 		    switch_ns(pid, &mnt_ns_desc, NULL))
-			exit(-1);
+			exit(1);
 		exit(0);
 	}
 
@@ -1427,11 +1422,9 @@ static int start_usernsd(void)
 	if (install_service_fd(USERNSD_SK, sk[0]) < 0) {
 		kill(usernsd_pid, SIGKILL);
 		waitpid(usernsd_pid, NULL, 0);
-		close(sk[0]);
 		return -1;
 	}
 
-	close(sk[0]);
 	return 0;
 }
 
@@ -1737,6 +1730,9 @@ int prepare_namespace_before_tasks(void)
 		goto err_mnt;
 
 	if (read_mnt_ns_img())
+		goto err_img;
+
+	if (read_net_ns_img())
 		goto err_img;
 
 	return 0;

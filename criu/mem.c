@@ -81,7 +81,7 @@ unsigned long dump_pages_args_size(struct vm_area_list *vmas)
 	/* In the worst case I need one iovec for each page */
 	return sizeof(struct parasite_dump_pages_args) +
 		vmas->nr * sizeof(struct parasite_vma_entry) +
-		(vmas->priv_size + 1) * sizeof(struct iovec);
+		(vmas->nr_priv_pages + 1) * sizeof(struct iovec);
 }
 
 static inline bool __page_is_zero(u64 pme)
@@ -101,7 +101,6 @@ static inline bool __page_in_parent(bool dirty)
 
 bool should_dump_page(VmaEntry *vmae, u64 pme)
 {
-#ifdef CONFIG_VDSO
 	/*
 	 * vDSO area must be always dumped because on restore
 	 * we might need to generate a proxy.
@@ -117,7 +116,7 @@ bool should_dump_page(VmaEntry *vmae, u64 pme)
 	 */
 	if (vma_entry_is(vmae, VMA_AREA_VVAR))
 		return false;
-#endif
+
 	/*
 	 * Optimisation for private mapping pages, that haven't
 	 * yet being COW-ed
@@ -142,6 +141,20 @@ bool page_in_parent(bool dirty)
 	return __page_in_parent(dirty);
 }
 
+static bool is_stack(struct pstree_item *item, unsigned long vaddr)
+{
+	int i;
+
+	for (i = 0; i < item->nr_threads; i++) {
+		uint64_t sp = dmpi(item)->thread_sp[i];
+
+		if (!((sp ^ vaddr) & ~PAGE_MASK))
+			return true;
+	}
+
+	return false;
+}
+
 /*
  * This routine finds out what memory regions to grab from the
  * dumpee. The iovs generated are then fed into vmsplice to
@@ -151,25 +164,26 @@ bool page_in_parent(bool dirty)
  * the memory contents is present in the pagent image set.
  */
 
-static int generate_iovs(struct vma_area *vma, struct page_pipe *pp, u64 *map, u64 *off, bool has_parent)
+static int generate_iovs(struct pstree_item *item, struct vma_area *vma, struct page_pipe *pp, u64 *map, u64 *off, bool has_parent)
 {
 	u64 *at = &map[PAGE_PFN(*off)];
 	unsigned long pfn, nr_to_scan;
 	unsigned long pages[3] = {};
+	int ret = 0;
 
 	nr_to_scan = (vma_area_len(vma) - *off) / PAGE_SIZE;
 
 	for (pfn = 0; pfn < nr_to_scan; pfn++) {
 		unsigned long vaddr;
 		unsigned int ppb_flags = 0;
-		int ret;
+		int st;
 
 		if (!should_dump_page(vma->e, at[pfn]))
 			continue;
 
 		vaddr = vma->e->start + *off + pfn * PAGE_SIZE;
 
-		if (vma_entry_can_be_lazy(vma->e))
+		if (vma_entry_can_be_lazy(vma->e) && !is_stack(item, vaddr))
 			ppb_flags |= PPB_LAZY;
 
 		/*
@@ -181,19 +195,22 @@ static int generate_iovs(struct vma_area *vma, struct page_pipe *pp, u64 *map, u
 
 		if (has_parent && page_in_parent(at[pfn] & PME_SOFT_DIRTY)) {
 			ret = page_pipe_add_hole(pp, vaddr, PP_HOLE_PARENT);
-			pages[0]++;
+			st = 0;
 		} else {
 			ret = page_pipe_add_page(pp, vaddr, ppb_flags);
 			if (ppb_flags & PPB_LAZY && opts.lazy_pages)
-				pages[1]++;
+				st = 1;
 			else
-				pages[2]++;
+				st = 2;
 		}
 
 		if (ret) {
-			*off += pfn * PAGE_SIZE;
-			return ret;
+			/* Do not do pfn++, just bail out */
+			pr_debug("Pagemap full\n");
+			break;
 		}
+
+		pages[st]++;
 	}
 
 	*off += pfn * PAGE_SIZE;
@@ -205,7 +222,7 @@ static int generate_iovs(struct vma_area *vma, struct page_pipe *pp, u64 *map, u
 
 	pr_info("Pagemap generated: %lu pages (%lu lazy) %lu holes\n",
 		pages[2] + pages[1], pages[1], pages[0]);
-	return 0;
+	return ret;
 }
 
 static struct parasite_dump_pages_args *prep_dump_pages_args(struct parasite_ctl *ctl,
@@ -301,7 +318,7 @@ static int detect_pid_reuse(struct pstree_item *item,
 
 	if (!parent_ie) {
 		pr_err("Pid-reuse detection failed: no parent inventory, " \
-		       "check warnings in get_parent_stats\n");
+		       "check warnings in get_parent_inventory\n");
 		return -1;
 	}
 
@@ -330,6 +347,50 @@ static int detect_pid_reuse(struct pstree_item *item,
 	return 0;
 }
 
+static int generate_vma_iovs(struct pstree_item *item, struct vma_area *vma,
+			     struct page_pipe *pp, struct page_xfer *xfer,
+			     struct parasite_dump_pages_args *args,
+			     struct parasite_ctl *ctl, pmc_t *pmc,
+			     bool has_parent, bool pre_dump)
+{
+	u64 off = 0;
+	u64 *map;
+	int ret;
+
+	if (!vma_area_is_private(vma, kdat.task_size) &&
+				!vma_area_is(vma, VMA_ANON_SHARED))
+		return 0;
+
+	if (vma_entry_is(vma->e, VMA_AREA_AIORING)) {
+		if (pre_dump)
+			return 0;
+		has_parent = false;
+	}
+
+	map = pmc_get_map(pmc, vma);
+	if (!map)
+		return -1;
+
+	if (vma_area_is(vma, VMA_ANON_SHARED))
+		return add_shmem_area(item->pid->real, vma->e, map);
+
+again:
+	ret = generate_iovs(item,vma, pp, map, &off, has_parent);
+	if (ret == -EAGAIN) {
+		BUG_ON(!(pp->flags & PP_CHUNK_MODE));
+
+		ret = drain_pages(pp, ctl, args);
+		if (!ret)
+			ret = xfer_pages(pp, xfer);
+		if (!ret) {
+			page_pipe_reinit(pp);
+			goto again;
+		}
+	}
+
+	return ret;
+}
+
 static int __parasite_dump_pages_seized(struct pstree_item *item,
 		struct parasite_dump_pages_args *args,
 		struct vm_area_list *vma_area_list,
@@ -344,6 +405,7 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 	unsigned cpp_flags = 0;
 	unsigned long pmc_size;
 	int possible_pid_reuse = 0;
+	bool has_parent;
 
 	pr_info("\n");
 	pr_info("Dumping pages (type: %d pid: %d)\n", CR_FD_PAGES, item->pid->real);
@@ -352,14 +414,14 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 	timing_start(TIME_MEMDUMP);
 
 	pr_debug("   Private vmas %lu/%lu pages\n",
-			vma_area_list->priv_longest, vma_area_list->priv_size);
+		 vma_area_list->nr_priv_pages_longest, vma_area_list->nr_priv_pages);
 
 	/*
 	 * Step 0 -- prepare
 	 */
 
-	pmc_size = max(vma_area_list->priv_longest,
-		vma_area_list->shared_longest);
+	pmc_size = max(vma_area_list->nr_priv_pages_longest,
+		       vma_area_list->nr_shared_pages_longest);
 	if (pmc_init(&pmc, item->pid->real, &vma_area_list->h,
 			 pmc_size * PAGE_SIZE))
 		return -1;
@@ -371,7 +433,7 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 		 * use, i.e. on non-lazy non-predump.
 		 */
 		cpp_flags |= PP_CHUNK_MODE;
-	pp = create_page_pipe(vma_area_list->priv_size,
+	pp = create_page_pipe(vma_area_list->nr_priv_pages,
 					    mdc->lazy ? NULL : pargs_iovs(args),
 					    cpp_flags);
 	if (!pp)
@@ -409,41 +471,10 @@ static int __parasite_dump_pages_seized(struct pstree_item *item,
 	 * Step 1 -- generate the pagemap
 	 */
 	args->off = 0;
+	has_parent = !!xfer.parent && !possible_pid_reuse;
 	list_for_each_entry(vma_area, &vma_area_list->h, list) {
-		bool has_parent = !!xfer.parent;
-		u64 off = 0;
-		u64 *map;
-
-		if (!vma_area_is_private(vma_area, kdat.task_size) &&
-				!vma_area_is(vma_area, VMA_ANON_SHARED))
-			continue;
-		if (vma_entry_is(vma_area->e, VMA_AREA_AIORING)) {
-			if (mdc->pre_dump)
-				continue;
-			has_parent = false;
-		}
-
-		map = pmc_get_map(&pmc, vma_area);
-		if (!map)
-			goto out_xfer;
-		if (vma_area_is(vma_area, VMA_ANON_SHARED))
-			ret = add_shmem_area(item->pid->real, vma_area->e, map);
-		else {
-again:
-			ret = generate_iovs(vma_area, pp, map, &off,
-				has_parent && !possible_pid_reuse);
-			if (ret == -EAGAIN) {
-				BUG_ON(!(pp->flags & PP_CHUNK_MODE));
-
-				ret = drain_pages(pp, ctl, args);
-				if (!ret)
-					ret = xfer_pages(pp, &xfer);
-				if (!ret) {
-					page_pipe_reinit(pp);
-					goto again;
-				}
-			}
-		}
+		ret = generate_vma_iovs(item, vma_area, pp, &xfer, args, ctl,
+					&pmc, has_parent, mdc->pre_dump);
 		if (ret < 0)
 			goto out_xfer;
 	}
@@ -566,7 +597,6 @@ int prepare_mm_pid(struct pstree_item *i)
 		if (!vma)
 			break;
 
-		ret = 0;
 		ri->vmas.nr++;
 		if (!img)
 			vma->e = ri->mm->vmas[vn++];
@@ -575,15 +605,16 @@ int prepare_mm_pid(struct pstree_item *i)
 			if (ret <= 0) {
 				xfree(vma);
 				close_image(img);
+				img = NULL;
 				break;
 			}
 		}
 		list_add_tail(&vma->list, &ri->vmas.h);
 
 		if (vma_area_is_private(vma, kdat.task_size)) {
-			ri->vmas.priv_size += vma_area_len(vma);
+			ri->vmas.rst_priv_size += vma_area_len(vma);
 			if (vma_has_guard_gap_hidden(vma))
-				ri->vmas.priv_size += PAGE_SIZE;
+				ri->vmas.rst_priv_size += PAGE_SIZE;
 		}
 
 		pr_info("vma 0x%"PRIx64" 0x%"PRIx64"\n", vma->e->start, vma->e->end);
@@ -601,6 +632,8 @@ int prepare_mm_pid(struct pstree_item *i)
 			break;
 	}
 
+	if (img)
+		close_image(img);
 	return ret;
 }
 
@@ -614,7 +647,7 @@ static inline bool check_cow_vmas(struct vma_area *vma, struct vma_area *pvma)
 	 * memcmp'aring the contents.
 	 */
 
-	/* ... coinside by start/stop pair (start is checked by caller) */
+	/* ... coincide by start/stop pair (start is checked by caller) */
 	if (vma->e->end != pvma->e->end)
 		return false;
 	/* ... both be private (and thus have space in premmaped area) */
@@ -622,7 +655,7 @@ static inline bool check_cow_vmas(struct vma_area *vma, struct vma_area *pvma)
 		return false;
 	if (!vma_area_is_private(pvma, kdat.task_size))
 		return false;
-	/* ... have growsdown and anon flags coinside */
+	/* ... have growsdown and anon flags coincide */
 	if ((vma->e->flags ^ pvma->e->flags) & (MAP_GROWSDOWN | MAP_ANONYMOUS))
 		return false;
 	/* ... belong to the same file if being filemap */
@@ -1138,17 +1171,17 @@ int prepare_mappings(struct pstree_item *t)
 		goto out;
 
 	/* Reserve a place for mapping private vma-s one by one */
-	addr = mmap(NULL, vmas->priv_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+	addr = mmap(NULL, vmas->rst_priv_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
 	if (addr == MAP_FAILED) {
 		ret = -1;
-		pr_perror("Unable to reserve memory (%lu bytes)", vmas->priv_size);
+		pr_perror("Unable to reserve memory (%lu bytes)", vmas->rst_priv_size);
 		goto out;
 	}
 
 	old_premmapped_addr = rsti(t)->premmapped_addr;
 	old_premmapped_len = rsti(t)->premmapped_len;
 	rsti(t)->premmapped_addr = addr;
-	rsti(t)->premmapped_len = vmas->priv_size;
+	rsti(t)->premmapped_len = vmas->rst_priv_size;
 
 	ret = open_page_read(vpid(t), &pr, PR_TASK);
 	if (ret <= 0)
@@ -1271,7 +1304,12 @@ static int prepare_vma_ios(struct pstree_item *t, struct task_restore_args *ta)
 {
 	struct cr_img *pages;
 
-	pages = open_image(CR_FD_PAGES, O_RSTR, rsti(t)->pages_img_id);
+	/*
+	 * If auto-dedup is on we need RDWR mode to be able to punch holes in
+	 * the input files (in restorer.c)
+	 */
+	pages = open_image(CR_FD_PAGES, opts.auto_dedup ? O_RDWR : O_RSTR,
+				rsti(t)->pages_img_id);
 	if (!pages)
 		return -1;
 

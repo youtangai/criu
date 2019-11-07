@@ -56,6 +56,8 @@ struct dmp_info {
 	struct ns_id *netns;
 	struct page_pipe *mem_pp;
 	struct parasite_ctl *parasite_ctl;
+	struct parasite_thread_ctl **thread_ctls;
+	uint64_t *thread_sp;
 };
 
 static inline struct dmp_info *dmpi(const struct pstree_item *i)
@@ -63,7 +65,7 @@ static inline struct dmp_info *dmpi(const struct pstree_item *i)
 	return (struct dmp_info *)(i + 1);
 }
 
-/* ids is alocated and initialized for all alive tasks */
+/* ids is allocated and initialized for all alive tasks */
 static inline int shared_fdtable(struct pstree_item *item)
 {
 	return (item->parent &&

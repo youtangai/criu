@@ -58,7 +58,7 @@ static int parse_binfmt_misc_entry(struct bfd *f, BinfmtMiscEntry *bme)
 		char *str;
 
 		str = breadline(f);
-                if (IS_ERR(str))
+		if (IS_ERR(str))
 			return -1;
 		if (!str)
 			break;
@@ -171,7 +171,7 @@ static int binfmt_misc_dump(struct mount_info *pm)
 			continue;
 
 		if (!img) {
-			/* Create image only if an extry exists, i.e. here */
+			/* Create image only if an entry exists, i.e. here */
 			img = open_image(CR_FD_BINFMT_MISC, O_DUMP);
 			if (!img)
 				goto out;
@@ -382,7 +382,6 @@ int collect_binfmt_misc(void)
 static int tmpfs_dump(struct mount_info *pm)
 {
 	int ret = -1, fd = -1, userns_pid = -1;
-	char tmpfs_path[PSFDS];
 	struct cr_img *img;
 	int tmp_fds[3], ntmp_fds = 0, i;
 
@@ -417,12 +416,10 @@ static int tmpfs_dump(struct mount_info *pm)
 	if (!img)
 		goto out;
 
-	sprintf(tmpfs_path, "/proc/self/fd/%d", fd);
-
 	if (root_ns_mask & CLONE_NEWUSER)
 		userns_pid = root_item->pid->real;
 
-	ret = cr_system_userns(-1, img_raw_fd(img), -1, "tar", (char *[])
+	ret = cr_system_userns(fd, img_raw_fd(img), -1, "tar", (char *[])
 			{ "tar", "--create",
 			"--gzip",
 			"--no-unquote",
@@ -432,7 +429,7 @@ static int tmpfs_dump(struct mount_info *pm)
 			"--preserve-permissions",
 			"--sparse",
 			"--numeric-owner",
-			"--directory", tmpfs_path, ".", NULL }, 0, userns_pid);
+			"--directory", "/proc/self/fd/0", ".", NULL }, 0, userns_pid);
 
 	if (ret)
 		pr_err("Can't dump tmpfs content\n");

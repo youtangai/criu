@@ -17,6 +17,7 @@
 #include "images/inventory.pb-c.h"
 #include "images/pagemap.pb-c.h"
 #include "proc_parse.h"
+#include "namespaces.h"
 
 bool ns_per_id = false;
 bool img_common_magic = true;
@@ -91,6 +92,7 @@ out_close:
 int write_img_inventory(InventoryEntry *he)
 {
 	struct cr_img *img;
+	int ret;
 
 	pr_info("Writing image inventory (version %u)\n", CRTOOLS_IMAGES_V1);
 
@@ -98,15 +100,16 @@ int write_img_inventory(InventoryEntry *he)
 	if (!img)
 		return -1;
 
-	if (pb_write_one(img, he, PB_INVENTORY) < 0)
-		return -1;
+	ret = pb_write_one(img, he, PB_INVENTORY);
 
 	xfree(he->root_ids);
 	close_image(img);
+	if (ret < 0)
+		return -1;
 	return 0;
 }
 
-int invertory_save_uptime(InventoryEntry *he)
+int inventory_save_uptime(InventoryEntry *he)
 {
 	if (!opts.track_mem)
 		return 0;
@@ -122,6 +125,18 @@ int invertory_save_uptime(InventoryEntry *he)
 	return 0;
 }
 
+/*
+ * This function is intended to get an inventory image from previous (parent)
+ * dump iteration. We use dump_uptime from the image in detect_pid_reuse().
+ *
+ * You see that these function never fails by itself, it only prints warnings
+ * to better understand reasons why we don't found a proper image, failing here
+ * is too early. We get to detect_pid_reuse() only if we have a parent pagemap
+ * and that's the proper place to fail: we know that there is a parent pagemap
+ * but we don't have (can't access, etc) parent inventory => can't detect
+ * pid-reuse => fail.
+ */
+
 InventoryEntry *get_parent_inventory(void)
 {
 	struct cr_img *img;
@@ -130,26 +145,34 @@ InventoryEntry *get_parent_inventory(void)
 
 	dir = openat(get_service_fd(IMG_FD_OFF), CR_PARENT_LINK, O_RDONLY);
 	if (dir == -1) {
-		pr_warn("Failed to open parent directory");
+		/*
+		 * We print the warning below to be notified that we had some
+		 * unexpected problem on open. For instance we have a parent
+		 * directory but have no access. Having no parent inventory
+		 * when also having no parent directory is an expected case of
+		 * first dump iteration.
+		 */
+		if (errno != ENOENT)
+			pr_warn("Failed to open parent directory\n");
 		return NULL;
 	}
 
 	img = open_image_at(dir, CR_FD_INVENTORY, O_RSTR);
 	if (!img) {
-		pr_warn("Failed to open parent pre-dump inventory image");
+		pr_warn("Failed to open parent pre-dump inventory image\n");
 		close(dir);
 		return NULL;
 	}
 
 	if (pb_read_one(img, &ie, PB_INVENTORY) < 0) {
-		pr_warn("Failed to read parent pre-dump inventory entry");
+		pr_warn("Failed to read parent pre-dump inventory entry\n");
 		close_image(img);
 		close(dir);
 		return NULL;
 	}
 
 	if (!ie->has_dump_uptime) {
-		pr_warn("Parent pre-dump inventory has no uptime");
+		pr_warn("Parent pre-dump inventory has no uptime\n");
 		inventory_entry__free_unpacked(ie, NULL);
 		ie = NULL;
 	}
@@ -367,15 +390,51 @@ static int img_write_magic(struct cr_img *img, int oflags, int type)
 	return write_img(img, &imgset_template[type].magic);
 }
 
+struct openat_args {
+	char	path[PATH_MAX];
+	int	flags;
+	int	err;
+	int	mode;
+};
+
+static int userns_openat(void *arg, int dfd, int pid)
+{
+	struct openat_args *pa = (struct openat_args *)arg;
+	int ret;
+
+	ret = openat(dfd, pa->path, pa->flags, pa->mode);
+	if (ret < 0)
+		pa->err = errno;
+
+	return ret;
+}
+
 static int do_open_image(struct cr_img *img, int dfd, int type, unsigned long oflags, char *path)
 {
 	int ret, flags;
 
-	flags = oflags & ~(O_NOBUF | O_SERVICE);
+	flags = oflags & ~(O_NOBUF | O_SERVICE | O_FORCE_LOCAL);
 
-	ret = openat(dfd, path, flags, CR_FD_PERM);
+	/*
+	 * For pages images dedup we need to open images read-write on
+	 * restore, that may require proper capabilities, so we ask
+	 * usernsd to do it for us
+	 */
+	if (root_ns_mask & CLONE_NEWUSER &&
+	    type == CR_FD_PAGES && oflags & O_RDWR) {
+		struct openat_args pa = {
+			.flags = flags,
+			.err = 0,
+			.mode = CR_FD_PERM,
+		};
+		snprintf(pa.path, PATH_MAX, "%s", path);
+		ret = userns_call(userns_openat, UNS_FDOUT, &pa, sizeof(struct openat_args), dfd);
+		if (ret < 0)
+			errno = pa.err;
+	} else
+		ret = openat(dfd, path, flags, CR_FD_PERM);
 	if (ret < 0) {
-		if (!(flags & O_CREAT) && (errno == ENOENT)) {
+		if (!(flags & O_CREAT) && (errno == ENOENT || ret == -ENOENT)) {
 			pr_info("No %s image\n", path);
 			img->_x.fd = EMPTY_IMG_FD;
 			goto skip_magic;
@@ -472,7 +531,8 @@ int open_image_dir(char *dir)
 	}
 
 	ret = install_service_fd(IMG_FD_OFF, fd);
-	close(fd);
+	if (ret < 0)
+		return -1;
 	fd = ret;
 
 	if (opts.img_parent) {

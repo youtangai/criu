@@ -86,11 +86,15 @@ int dedup_one_iovec(struct page_read *pr, unsigned long off, unsigned long len)
 
 		ret = pr->seek_pagemap(pr, off);
 		if (ret == 0) {
-			pr_warn("Missing %lx in parent pagemap\n", off);
-			if (off < pr->cvaddr && pr->cvaddr < iov_end)
+			if (off < pr->cvaddr && pr->cvaddr < iov_end) {
+				pr_debug("pr%lu-%u:No range %lx-%lx in pagemap\n",
+					 pr->img_id, pr->id, off, pr->cvaddr);
 				off = pr->cvaddr;
-			else
+			} else {
+				pr_debug("pr%lu-%u:No range %lx-%lx in pagemap\n",
+					 pr->img_id, pr->id, off, iov_end);
 				return 0;
+			}
 		}
 
 		if (!pr->pe)
@@ -105,7 +109,8 @@ int dedup_one_iovec(struct page_read *pr, unsigned long off, unsigned long len)
 		prp = pr->parent;
 		if (prp) {
 			/* recursively */
-			pr_debug("Go to next parent level\n");
+			pr_debug("pr%lu-%u:Go to next parent level\n",
+				 pr->img_id, pr->id);
 			len = min(piov_end, iov_end) - off;
 			ret = dedup_one_iovec(prp, off, len);
 			if (ret != 0)
@@ -150,8 +155,7 @@ static int seek_pagemap(struct page_read *pr, unsigned long vaddr)
 
 	do {
 		unsigned long start = pr->pe->vaddr;
-		unsigned long len = pr->pe->nr_pages * PAGE_SIZE;
-		unsigned long end = start + len;
+		unsigned long end = start + pagemap_len(pr->pe);
 
 		if (vaddr < pr->cvaddr)
 			break;
@@ -239,7 +243,7 @@ static int read_local_page(struct page_read *pr, unsigned long vaddr,
 			   unsigned long len, void *buf)
 {
 	int fd = img_raw_fd(pr->pi);
-	int ret;
+	ssize_t ret;
 	size_t curr = 0;
 
 	/*
@@ -253,7 +257,7 @@ static int read_local_page(struct page_read *pr, unsigned long vaddr,
 	while (1) {
 		ret = pread(fd, buf + curr, len - curr, pr->pi_off + curr);
 		if (ret < 1) {
-			pr_perror("Can't read mapping page %d", ret);
+			pr_perror("Can't read mapping page %zd", ret);
 			return -1;
 		}
 		curr += ret;
@@ -459,6 +463,7 @@ static void free_pagemaps(struct page_read *pr)
 		pagemap_entry__free_unpacked(pr->pmes[i], NULL);
 
 	xfree(pr->pmes);
+	pr->pmes = NULL;
 }
 
 static void advance_piov(struct page_read_iov *piov, ssize_t len)
@@ -678,11 +683,13 @@ static int init_pagemaps(struct page_read *pr)
 
 		pr->nr_pmes++;
 		if (pr->nr_pmes >= nr_pmes) {
+			PagemapEntry **new;
 			nr_pmes += nr_realloc;
-			pr->pmes = xrealloc(pr->pmes,
+			new = xrealloc(pr->pmes,
 					    nr_pmes * sizeof(*pr->pmes));
-			if (!pr->pmes)
+			if (!new)
 				goto free_pagemaps;
+			pr->pmes = new;
 		}
 	}
 

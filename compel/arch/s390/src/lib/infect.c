@@ -148,10 +148,8 @@ int sigreturn_prep_regs_plain(struct rt_sigframe *sigframe,
 		memcpy(&dst_ext->vxrs_high, &fpregs->vxrs_high,
 		       sizeof(fpregs->vxrs_high));
 	} else {
-		memset(&dst_ext->vxrs_low, 0,
-		       sizeof(sizeof(fpregs->vxrs_low)));
-		memset(&dst_ext->vxrs_high, 0,
-		       sizeof(sizeof(fpregs->vxrs_high)));
+		memset(&dst_ext->vxrs_low, 0, sizeof(dst_ext->vxrs_low));
+		memset(&dst_ext->vxrs_high, 0, sizeof(dst_ext->vxrs_high));
 	}
 	return 0;
 }
@@ -455,7 +453,7 @@ void *remote_mmap(struct parasite_ctl *ctl,
 	if (ptrace_poke_area(pid, &arg_struct, where, sizeof(arg_struct))) {
 		pr_err("Can't restore mmap args (pid: %d)\n", pid);
 		if (map != 0) {
-			err = compel_syscall(ctl, __NR_munmap, NULL, map,
+			compel_syscall(ctl, __NR_munmap, NULL, map,
 					     length, 0, 0, 0, 0);
 			map = 0;
 		}
@@ -495,7 +493,7 @@ bool arch_can_dump_task(struct parasite_ctl *ctl)
 	if (psw->mask & PSW_MASK_RI) {
 		if (get_ri_cb(pid, &fpregs) < 0) {
 			pr_perror("Can't dump process with RI bit active");
-			return -1;
+			return false;
 		}
 	}
 	/* We don't support 24 and 31 bit mode - only 64 bit */

@@ -7,7 +7,7 @@
 #include "fs.h"
 #include "ofd_file_locks.h"
 
-static int parse_ofd_lock(char *buf, struct flock64 *lck)
+static int parse_ofd_lock(char *buf, struct flock *lck)
 {
 	char fl_flag[10], fl_type[15], fl_option[10], fl_end[32];
 	long long start;
@@ -48,7 +48,7 @@ static int parse_ofd_lock(char *buf, struct flock64 *lck)
 	return 0;
 }
 
-static int read_fd_ofd_lock(int pid, int fd, struct flock64 *lck)
+static int read_fd_ofd_lock(int pid, int fd, struct flock *lck)
 {
 	char path[PATH_MAX];
 	char buf[100];
@@ -77,7 +77,7 @@ static int read_fd_ofd_lock(int pid, int fd, struct flock64 *lck)
 	return num;
 }
 
-int check_lock_exists(const char *filename, struct flock64 *lck)
+int check_lock_exists(const char *filename, struct flock *lck)
 {
 	int ret = -1;
 	int fd;
@@ -86,7 +86,7 @@ int check_lock_exists(const char *filename, struct flock64 *lck)
 
 	if (lck->l_type == F_RDLCK) {
 		/* check, that there is no write lock */
-		ret = fcntl(fd, F_OFD_GETLK, lck);
+		ret = zdtm_fcntl(fd, F_OFD_GETLK, lck);
 		if (ret) {
 			pr_err("fcntl failed (%i)\n", ret);
 			goto out;
@@ -99,7 +99,7 @@ int check_lock_exists(const char *filename, struct flock64 *lck)
 
 	/* check, that lock is set */
 	lck->l_type = F_WRLCK;
-	ret = fcntl(fd, F_OFD_GETLK, lck);
+	ret = zdtm_fcntl(fd, F_OFD_GETLK, lck);
 	if (ret) {
 		pr_err("fcntl failed (%i)\n", ret);
 		goto out;
@@ -116,16 +116,16 @@ out:
 	return ret;
 }
 
-static int check_file_locks_match(struct flock64 *orig_lck, struct flock64 *lck)
+static int check_file_locks_match(struct flock *orig_lck, struct flock *lck)
 {
 	return orig_lck->l_start == lck->l_start &&
 		orig_lck->l_len == lck->l_len &&
 		orig_lck->l_type == lck->l_type;
 }
 
-int check_file_lock_restored(int pid, int fd, struct flock64 *lck)
+int check_file_lock_restored(int pid, int fd, struct flock *lck)
 {
-	struct flock64 lck_restored;
+	struct flock lck_restored;
 
 	if (read_fd_ofd_lock(pid, fd, &lck_restored))
 		return -1;
@@ -135,4 +135,60 @@ int check_file_lock_restored(int pid, int fd, struct flock64 *lck)
 		return -1;
 	}
 	return 0;
+}
+
+/*
+ * fcntl() wrapper for ofd locks.
+ *
+ * Kernel requires ia32 processes to use fcntl64() syscall for ofd:
+ * COMPAT_SYSCALL_DEFINE3(fcntl, [..])
+ * {
+ *	switch (cmd) {
+ *	case F_GETLK64:
+ *	case F_SETLK64:
+ *	case F_SETLKW64:
+ *	case F_OFD_GETLK:
+ *	case F_OFD_SETLK:
+ *	case F_OFD_SETLKW:
+ *	return -EINVAL;
+ * }
+ *
+ * Glibc does all the needed wraps for fcntl(), but only from v2.28.
+ * To make ofd tests run on the older glibc's - provide zdtm wrap.
+ *
+ * Note: we don't need the wraps in CRIU itself as parasite/restorer
+ * run in 64-bit mode as long as possible, including the time to play
+ * with ofd (and they are dumped from CRIU).
+ */
+int zdtm_fcntl(int fd, int cmd, struct flock *f)
+{
+#if defined(__i386__)
+#ifndef __NR_fcntl64
+# define __NR_fcntl64 221
+#endif
+	struct flock64 f64 = {};
+	int ret;
+
+	switch (cmd) {
+		case F_OFD_SETLK:
+		case F_OFD_SETLKW:
+			f64.l_type	= f->l_type;
+			f64.l_whence	= f->l_whence;
+			f64.l_start	= f->l_start;
+			f64.l_len	= f->l_len;
+			f64.l_pid	= f->l_pid;
+			return syscall(__NR_fcntl64, fd, cmd, &f64);
+		case F_OFD_GETLK:
+			ret = syscall(__NR_fcntl64, fd, cmd, &f64);
+			f->l_type	= f64.l_type;
+			f->l_whence	= f64.l_whence;
+			f->l_start	= f64.l_start;
+			f->l_len	= f64.l_len;
+			f->l_pid	= f64.l_pid;
+			return ret;
+		default:
+			break;
+	}
+#endif
+	return fcntl(fd, cmd, f);
 }

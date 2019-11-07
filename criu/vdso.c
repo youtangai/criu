@@ -505,7 +505,7 @@ static int vdso_fill_compat_symtable(struct vdso_maps *native,
 		return 0;
 
 	vdso_mmap = mmap(NULL, COMPAT_VDSO_BUF_SZ, PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANON, -1, 0);
+			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (vdso_mmap == MAP_FAILED) {
 		pr_perror("Failed to mmap buf for compat vdso");
 		return -1;
@@ -597,7 +597,8 @@ int vdso_init_restore(void)
 
 	vdso_maps.sym = kdat.vdso_sym;
 #ifdef CONFIG_COMPAT
-	vdso_maps_compat.sym = kdat.vdso_sym_compat;
+	vdso_maps_compat.sym		= kdat.vdso_sym_compat;
+	vdso_maps_compat.compatible	= true;
 #endif
 
 	return 0;
@@ -621,7 +622,8 @@ int kerndat_vdso_fill_symtable(void)
 		pr_err("Failed to fill compat vdso symtable\n");
 		return -1;
 	}
-	kdat.vdso_sym_compat = vdso_maps_compat.sym;
+	vdso_maps_compat.compatible	= true;
+	kdat.vdso_sym_compat		= vdso_maps_compat.sym;
 #endif
 
 	return 0;
@@ -656,7 +658,7 @@ int kerndat_vdso_preserves_hint(void)
 		void *new_addr;
 
 		new_addr = mmap(0, vdso_size, PROT_NONE,
-				MAP_ANON | MAP_PRIVATE, -1, 0);
+				MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 		if (new_addr == MAP_FAILED)
 			exit(1);
 

@@ -1,4 +1,3 @@
-#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -14,10 +13,8 @@
 #include <sys/stat.h>
 #include <sys/vfs.h>
 #include <sys/time.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
 
-#include <sys/sendfile.h>
 
 #include <sched.h>
 #include <sys/resource.h>
@@ -82,6 +79,7 @@
 #include "seize.h"
 #include "fault-injection.h"
 #include "dump.h"
+#include "eventpoll.h"
 
 /*
  * Architectures can overwrite this function to restore register sets that
@@ -110,8 +108,7 @@ void free_mappings(struct vm_area_list *vma_area_list)
 		free(vma_area);
 	}
 
-	INIT_LIST_HEAD(&vma_area_list->h);
-	vma_area_list->nr = 0;
+	vm_area_list_init(vma_area_list);
 }
 
 int collect_mappings(pid_t pid, struct vm_area_list *vma_area_list,
@@ -128,7 +125,7 @@ int collect_mappings(pid_t pid, struct vm_area_list *vma_area_list,
 		goto err;
 
 	pr_info("Collected, longest area occupies %lu pages\n",
-			vma_area_list->priv_longest);
+		vma_area_list->nr_priv_pages_longest);
 	pr_info_vma_list(&vma_area_list->h);
 
 	pr_info("----------------------------------------\n");
@@ -715,6 +712,9 @@ int dump_thread_core(int pid, CoreEntry *core, const struct parasite_dump_thread
 			tc->has_pdeath_sig = true;
 			tc->pdeath_sig = ti->pdeath_sig;
 		}
+		tc->comm = xstrdup(ti->comm);
+		if (tc->comm == NULL)
+			return -1;
 	}
 	if (!ret)
 		ret = seccomp_dump_thread(pid, tc);
@@ -725,7 +725,8 @@ int dump_thread_core(int pid, CoreEntry *core, const struct parasite_dump_thread
 static int dump_task_core_all(struct parasite_ctl *ctl,
 			      struct pstree_item *item,
 			      const struct proc_pid_stat *stat,
-			      const struct cr_imgset *cr_imgset)
+			      const struct cr_imgset *cr_imgset,
+			      const struct parasite_dump_misc *misc)
 {
 	struct cr_img *img;
 	CoreEntry *core = item->core[0];
@@ -738,6 +739,9 @@ static int dump_task_core_all(struct parasite_ctl *ctl,
 	pr_info("\n");
 	pr_info("Dumping core (pid: %d)\n", pid);
 	pr_info("----------------------------------------\n");
+
+	core->tc->child_subreaper = misc->child_subreaper;
+	core->tc->has_child_subreaper = true;
 
 	ret = get_task_personality(pid, &core->tc->personality);
 	if (ret < 0)
@@ -837,6 +841,7 @@ static int collect_file_locks(void)
 static int dump_task_thread(struct parasite_ctl *parasite_ctl,
 				const struct pstree_item *item, int id)
 {
+	struct parasite_thread_ctl *tctl = dmpi(item)->thread_ctls[id];
 	struct pid *tid = &item->threads[id];
 	CoreEntry *core = item->core[id];
 	pid_t pid = tid->real;
@@ -847,7 +852,7 @@ static int dump_task_thread(struct parasite_ctl *parasite_ctl,
 	pr_info("Dumping core for thread (pid: %d)\n", pid);
 	pr_info("----------------------------------------\n");
 
-	ret = parasite_dump_thread_seized(parasite_ctl, id, tid, core);
+	ret = parasite_dump_thread_seized(tctl, parasite_ctl, id, tid, core);
 	if (ret) {
 		pr_err("Can't dump thread for pid %d\n", pid);
 		goto err;
@@ -1136,8 +1141,7 @@ static int pre_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	struct parasite_dump_misc misc;
 	struct mem_dump_ctl mdc;
 
-	INIT_LIST_HEAD(&vmas.h);
-	vmas.nr = 0;
+	vm_area_list_init(&vmas);
 
 	pr_info("========================================\n");
 	pr_info("Pre-dumping task (pid: %d)\n", pid);
@@ -1218,8 +1222,7 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 	struct proc_posix_timers_stat proc_args;
 	struct mem_dump_ctl mdc;
 
-	INIT_LIST_HEAD(&vmas.h);
-	vmas.nr = 0;
+	vm_area_list_init(&vmas);
 
 	pr_info("========================================\n");
 	pr_info("Dumping task (pid: %d)\n", pid);
@@ -1292,8 +1295,6 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 
 		if (install_service_fd(CR_PROC_FD_OFF, pfd) < 0)
 			goto err_cure_imgset;
-
-		close(pfd);
 	}
 
 	ret = parasite_fixup_vdso(parasite_ctl, pid, &vmas);
@@ -1344,6 +1345,11 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 			pr_err("Dump files (pid: %d) failed with %d\n", pid, ret);
 			goto err_cure;
 		}
+		ret = flush_eventpoll_dinfo_queue();
+		if (ret) {
+			pr_err("Dump eventpoll (pid: %d) failed with %d\n", pid, ret);
+			goto err_cure;
+		}
 	}
 
 	mdc.pre_dump = false;
@@ -1373,7 +1379,7 @@ static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
 		goto err_cure;
 	}
 
-	ret = dump_task_core_all(parasite_ctl, item, &pps_buf, cr_imgset);
+	ret = dump_task_core_all(parasite_ctl, item, &pps_buf, cr_imgset, &misc);
 	if (ret) {
 		pr_err("Dump core (pid: %d) failed with %d\n", pid, ret);
 		goto err_cure;
@@ -1463,10 +1469,11 @@ static int setup_alarm_handler()
 	return 0;
 }
 
-static int cr_pre_dump_finish(int ret)
+static int cr_pre_dump_finish(int status)
 {
 	InventoryEntry he = INVENTORY_ENTRY__INIT;
 	struct pstree_item *item;
+	int ret;
 
 	/*
 	 * Restore registers for tasks only. The threads have not been
@@ -1476,13 +1483,18 @@ static int cr_pre_dump_finish(int ret)
 	if (ret)
 		goto err;
 
-	ret = invertory_save_uptime(&he);
+	ret = inventory_save_uptime(&he);
 	if (ret)
 		goto err;
 
 	pstree_switch_state(root_item, TASK_ALIVE);
 
 	timing_stop(TIME_FROZEN);
+
+	if (status < 0) {
+		ret = status;
+		goto err;
+	}
 
 	pr_info("Pre-dumping tasks' memory\n");
 	for_each_pstree_item(item) {
@@ -1545,6 +1557,11 @@ int cr_pre_dump_tasks(pid_t pid)
 	InventoryEntry *parent_ie = NULL;
 	struct pstree_item *item;
 	int ret = -1;
+
+	/*
+	 * We might need a lot of pipes to fetch huge number of pages to dump.
+	 */
+	rlimit_unlimit_nofile();
 
 	root_item = alloc_pstree_item();
 	if (!root_item)
@@ -1630,8 +1647,10 @@ static int cr_lazy_mem_dump(void)
 	ret = cr_page_server(false, true, -1);
 
 	for_each_pstree_item(item) {
-		destroy_page_pipe(dmpi(item)->mem_pp);
-		compel_cure_local(dmpi(item)->parasite_ctl);
+		if (item->pid->state != TASK_DEAD) {
+			destroy_page_pipe(dmpi(item)->mem_pp);
+			compel_cure_local(dmpi(item)->parasite_ctl);
+		}
 	}
 
 	if (ret)
@@ -1741,6 +1760,13 @@ int cr_dump_tasks(pid_t pid)
 	pr_info("Dumping processes (pid: %d)\n", pid);
 	pr_info("========================================\n");
 
+	/*
+	 *  We will fetch all file descriptors for each task, their number can
+	 *  be bigger than a default file limit, so we need to raise it to the
+	 *  maximum.
+	 */
+	rlimit_unlimit_nofile();
+
 	root_item = alloc_pstree_item();
 	if (!root_item)
 		goto err;
@@ -1781,7 +1807,7 @@ int cr_dump_tasks(pid_t pid)
 	if (prepare_inventory(&he))
 		goto err;
 
-	if (opts.cpu_cap & (CPU_CAP_CPU | CPU_CAP_INS)) {
+	if (opts.cpu_cap & CPU_CAP_IMAGE) {
 		if (cpu_dump_cpuinfo())
 			goto err;
 	}
@@ -1886,7 +1912,7 @@ int cr_dump_tasks(pid_t pid)
 	if (ret)
 		goto err;
 
-	ret = invertory_save_uptime(&he);
+	ret = inventory_save_uptime(&he);
 	if (ret)
 		goto err;
 

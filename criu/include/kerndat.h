@@ -5,9 +5,7 @@
 #include "int.h"
 #include "common/config.h"
 #include "asm/kerndat.h"
-#ifdef CONFIG_VDSO
 #include "util-vdso.h"
-#endif
 
 struct stat;
 
@@ -17,10 +15,6 @@ struct stat;
  */
 
 extern int kerndat_init(void);
-extern int kerndat_get_dirty_track(void);
-extern int kerndat_fdinfo_has_lock(void);
-extern int kerndat_loginuid(void);
-extern int kerndat_files_stat(bool early);
 
 enum pagemap_func {
 	PM_UNKNOWN,
@@ -61,18 +55,16 @@ struct kerndat_s {
 	bool has_thp_disable;
 	bool can_map_vdso;
 	bool vdso_hint_reliable;
-#ifdef CONFIG_VDSO
 	struct vdso_symtable	vdso_sym;
 #ifdef CONFIG_COMPAT
 	struct vdso_symtable	vdso_sym_compat;
 #endif
-#endif
 	bool has_nsid;
 	bool has_link_nsid;
 	unsigned int sysctl_nr_open;
-	unsigned long files_stat_max_files;
 	bool x86_has_ptrace_fpu_xsave_bug;
 	bool has_inotify_setnextwd;
+	bool has_kcmp_epoll_tfd;
 };
 
 extern struct kerndat_s kdat;
@@ -92,8 +84,5 @@ enum {
  * a new (likely virtuzlized) fs instance.
  */
 extern int kerndat_fs_virtualized(unsigned int which, u32 kdev);
-
-extern int kerndat_tcp_repair();
-extern int kerndat_uffd(void);
 
 #endif /* __CR_KERNDAT_H__ */

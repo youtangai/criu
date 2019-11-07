@@ -104,8 +104,6 @@ static struct page_pipe_buf *ppb_alloc(struct page_pipe *pp,
 		return NULL;
 	cnt_add(CNT_PAGE_PIPE_BUFS, 1);
 
-	ppb->pipe_off = 0;
-
 	if (prev && ppb_resize_pipe(prev) == 0) {
 		/* The previous pipe isn't full and we can continue to use it. */
 		ppb->p[0] = prev->p[0];
@@ -120,6 +118,7 @@ static struct page_pipe_buf *ppb_alloc(struct page_pipe *pp,
 		}
 		cnt_add(CNT_PAGE_PIPES, 1);
 
+		ppb->pipe_off = 0;
 		ppb->pipe_size = fcntl(ppb->p[0], F_GETPIPE_SZ, 0) / PAGE_SIZE;
 		pp->nr_pipes++;
 	}
@@ -188,26 +187,18 @@ struct page_pipe *create_page_pipe(unsigned int nr_segs, struct iovec *iovs, uns
 	if (!pp)
 		return NULL;
 
+	INIT_LIST_HEAD(&pp->free_bufs);
+	INIT_LIST_HEAD(&pp->bufs);
+	pp->nr_iovs = nr_segs;
 	pp->flags = flags;
 
 	if (!iovs) {
 		iovs = xmalloc(sizeof(*iovs) * nr_segs);
 		if (!iovs)
 			goto err_free_pp;
-
 		pp->flags |= PP_OWN_IOVS;
 	}
-
-	pp->nr_pipes = 0;
-	INIT_LIST_HEAD(&pp->bufs);
-	INIT_LIST_HEAD(&pp->free_bufs);
-	pp->nr_iovs = nr_segs;
 	pp->iovs = iovs;
-	pp->free_iov = 0;
-
-	pp->nr_holes = 0;
-	pp->free_hole = 0;
-	pp->holes = NULL;
 
 	if (page_pipe_grow(pp, 0))
 		goto err_free_iovs;
@@ -307,14 +298,12 @@ int page_pipe_add_hole(struct page_pipe *pp, unsigned long addr,
 		       unsigned int flags)
 {
 	if (pp->free_hole >= pp->nr_holes) {
-		pp->holes = xrealloc(pp->holes,
-				(pp->nr_holes + PP_HOLES_BATCH) * sizeof(struct iovec));
-		if (!pp->holes)
+		size_t new_size = (pp->nr_holes + PP_HOLES_BATCH) * sizeof(struct iovec);
+		if (xrealloc_safe(&pp->holes, new_size))
 			return -1;
 
-		pp->hole_flags = xrealloc(pp->hole_flags,
-					  (pp->nr_holes + PP_HOLES_BATCH) * sizeof(unsigned int));
-		if(!pp->hole_flags)
+		new_size = (pp->nr_holes + PP_HOLES_BATCH) * sizeof(unsigned int);
+		if (xrealloc_safe(&pp->hole_flags, new_size))
 			return -1;
 
 		pp->nr_holes += PP_HOLES_BATCH;
@@ -398,7 +387,7 @@ int page_pipe_read(struct page_pipe *pp, struct pipe_read_dest *prd,
 	struct page_pipe_buf *ppb;
 	struct iovec *iov = NULL;
 	unsigned long skip = 0, len;
-	int ret;
+	ssize_t ret;
 
 	/*
 	 * Get ppb that contains addr and count length of data between
@@ -427,13 +416,13 @@ int page_pipe_read(struct page_pipe *pp, struct pipe_read_dest *prd,
 
 	ret = tee(ppb->p[0], prd->p[1], len, 0);
 	if (ret != len) {
-		pr_perror("tee: %d", ret);
+		pr_perror("tee: %zd", ret);
 		return -1;
 	}
 
 	ret = splice(prd->p[0], NULL, prd->sink_fd, NULL, skip, 0);
 	if (ret != skip) {
-		pr_perror("splice: %d", ret);
+		pr_perror("splice: %zd", ret);
 		return -1;
 	}
 

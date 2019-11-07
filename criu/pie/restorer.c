@@ -16,6 +16,7 @@
 #include <sched.h>
 #include <sys/resource.h>
 #include <signal.h>
+#include <sys/inotify.h>
 
 #include "linux/userfaultfd.h"
 
@@ -43,6 +44,7 @@
 
 #include "images/creds.pb-c.h"
 #include "images/mm.pb-c.h"
+#include "images/inventory.pb-c.h"
 
 #include "shmem.h"
 #include "restorer.h"
@@ -50,6 +52,19 @@
 #ifndef PR_SET_PDEATHSIG
 #define PR_SET_PDEATHSIG 1
 #endif
+
+#ifndef PR_SET_CHILD_SUBREAPER
+#define PR_SET_CHILD_SUBREAPER 36
+#endif
+
+#ifndef FALLOC_FL_KEEP_SIZE
+#define FALLOC_FL_KEEP_SIZE     0x01
+#endif
+
+#ifndef FALLOC_FL_PUNCH_HOLE
+#define FALLOC_FL_PUNCH_HOLE    0x02
+#endif
+
 
 #define sys_prctl_safe(opcode, val1, val2, val3)			\
 	({								\
@@ -139,7 +154,7 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 	sys_exit_group(1);
 }
 
-static int lsm_set_label(char *label, int procfd)
+static int lsm_set_label(char *label, char *type, int procfd)
 {
 	int ret = -1, len, lsmfd;
 	char path[STD_LOG_SIMPLE_CHUNK];
@@ -147,9 +162,9 @@ static int lsm_set_label(char *label, int procfd)
 	if (!label)
 		return 0;
 
-	pr_info("restoring lsm profile %s\n", label);
+	pr_info("restoring lsm profile (%s) %s\n", type, label);
 
-	std_sprintf(path, "self/task/%ld/attr/current", sys_gettid());
+	std_sprintf(path, "self/task/%ld/attr/%s", sys_gettid(), type);
 
 	lsmfd = sys_openat(procfd, path, O_WRONLY, 0);
 	if (lsmfd < 0) {
@@ -170,7 +185,8 @@ static int lsm_set_label(char *label, int procfd)
 	return 0;
 }
 
-static int restore_creds(struct thread_creds_args *args, int procfd)
+static int restore_creds(struct thread_creds_args *args, int procfd,
+			 int lsm_type)
 {
 	CredsEntry *ce = &args->creds;
 	int b, i, ret;
@@ -246,7 +262,7 @@ static int restore_creds(struct thread_creds_args *args, int procfd)
 
 	/*
 	 * Fourth -- trim bset. This can only be done while
-	 * having the CAP_SETPCAP capablity.
+	 * having the CAP_SETPCAP capability.
 	 */
 
 	for (b = 0; b < CR_CAP_SIZE; b++) {
@@ -287,8 +303,21 @@ static int restore_creds(struct thread_creds_args *args, int procfd)
 		return -1;
 	}
 
-	if (lsm_set_label(args->lsm_profile, procfd) < 0)
+	if (lsm_type != LSMTYPE__SELINUX) {
+		/*
+		 * SELinux does not support setting the process context for
+		 * threaded processes. So this is skipped if running with
+		 * SELinux and instead the process context is set before the
+		 * threads are created.
+		 */
+		if (lsm_set_label(args->lsm_profile, "current", procfd) < 0)
+			return -1;
+	}
+
+	/* Also set the sockcreate label for all threads */
+	if (lsm_set_label(args->lsm_sockcreate, "sockcreate", procfd) < 0)
 		return -1;
+
 	return 0;
 }
 
@@ -300,10 +329,18 @@ static int restore_creds(struct thread_creds_args *args, int procfd)
 
 static inline int restore_pdeath_sig(struct thread_restore_args *ta)
 {
-	if (ta->pdeath_sig)
-		return sys_prctl(PR_SET_PDEATHSIG, ta->pdeath_sig, 0, 0, 0);
-	else
+	int ret;
+
+	if (!ta->pdeath_sig)
 		return 0;
+
+	ret = sys_prctl(PR_SET_PDEATHSIG, ta->pdeath_sig, 0, 0, 0);
+	if (ret) {
+		pr_err("Unable to set PR_SET_PDEATHSIG(%d): %d\n", ta->pdeath_sig, ret);
+		return -1;
+	}
+
+	return 0;
 }
 
 static int restore_dumpable_flag(MmEntry *mme)
@@ -440,6 +477,23 @@ static int restore_seccomp(struct thread_restore_args *args)
 		return 0;
 		break;
 	case SECCOMP_MODE_STRICT:
+		/*
+		 * Disable gettimeofday() from vdso: it may use TSC
+		 * which is restricted by kernel:
+		 *
+		 * static long seccomp_set_mode_strict(void)
+		 * {
+		 * [..]
+		 * #ifdef TIF_NOTSC
+		 *	disable_TSC();
+		 * #endif
+		 * [..]
+		 *
+		 * XXX: It may need to be fixed in kernel under
+		 * PTRACE_O_SUSPEND_SECCOMP, but for now just get timings
+		 * with a raw syscall instead of vdso.
+		 */
+		std_log_set_gettimeofday(NULL);
 		ret = sys_prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT, 0, 0, 0);
 		if (ret < 0) {
 			pr_err("seccomp: SECCOMP_MODE_STRICT returned %d on tid %d\n",
@@ -545,6 +599,12 @@ long __export_restore_thread(struct thread_restore_args *args)
 	if (restore_thread_common(args))
 		goto core_restore_end;
 
+	ret = sys_prctl(PR_SET_NAME, (unsigned long) &args->comm, 0, 0, 0);
+	if (ret) {
+		pr_err("Unable to set a thread name: %d\n", ret);
+		goto core_restore_end;
+	}
+
 	pr_info("%ld: Restored\n", sys_gettid());
 
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE);
@@ -561,7 +621,8 @@ long __export_restore_thread(struct thread_restore_args *args)
 	if (restore_seccomp(args))
 		BUG();
 
-	ret = restore_creds(args->creds_args, args->ta->proc_fd);
+	ret = restore_creds(args->creds_args, args->ta->proc_fd,
+			    args->ta->lsm_type);
 	ret = ret || restore_dumpable_flag(&args->ta->mm);
 	ret = ret || restore_pdeath_sig(args);
 	if (ret)
@@ -647,6 +708,14 @@ static unsigned long restore_mapping(VmaEntry *vma_entry)
 			!(vma_entry->status & VMA_NO_PROT_WRITE))
 		prot |= PROT_WRITE;
 
+	/* TODO: Drop MAP_LOCKED bit and restore it after reading memory.
+	 *
+	 * Code below tries to limit memory usage by running fallocate()
+	 * after each preadv() to avoid doubling memory usage (once in
+	 * image files, once in process). Unfortunately, MAP_LOCKED defeats
+	 * that mechanism as it causes the process to be charged for memory
+	 * immediately upon mmap, not later upon preadv().
+	 */
 	pr_debug("\tmmap(%"PRIx64" -> %"PRIx64", %x %x %d)\n",
 			vma_entry->start, vma_entry->end,
 			prot, flags, (int)vma_entry->fd);
@@ -972,7 +1041,7 @@ static int timerfd_arm(struct task_restore_args *args)
 
 			t->val.it_value.tv_sec += (time_t)ts.tv_sec;
 
-			pr_debug("Ajust id %#x it_value(%llu, %llu) -> it_value(%llu, %llu)\n",
+			pr_debug("Adjust id %#x it_value(%llu, %llu) -> it_value(%llu, %llu)\n",
 				 t->id, (unsigned long long)ts.tv_sec,
 				 (unsigned long long)ts.tv_nsec,
 				 (unsigned long long)t->val.it_value.tv_sec,
@@ -1042,11 +1111,7 @@ static void restore_posix_timers(struct task_restore_args *args)
  * sys_munmap must not return here. The control process must
  * trap us on the exit from sys_munmap.
  */
-#ifdef CONFIG_VDSO
 unsigned long vdso_rt_size = 0;
-#else
-#define vdso_rt_size	(0)
-#endif
 
 void *bootstrap_start = NULL;
 unsigned int bootstrap_len = 0;
@@ -1168,32 +1233,148 @@ static int wait_zombies(struct task_restore_args *task_args)
 	return 0;
 }
 
-static bool vdso_unmapped(struct task_restore_args *args)
+static bool can_restore_vdso(struct task_restore_args *args)
 {
+	struct vdso_maps *rt = &args->vdso_maps_rt;
+	bool had_vdso = false, had_vvar = false;
 	unsigned int i;
 
-	/* Don't park rt-vdso or rt-vvar if dumpee doesn't have them */
 	for (i = 0; i < args->vmas_n; i++) {
 		VmaEntry *vma = &args->vmas[i];
 
-		if (vma_entry_is(vma, VMA_AREA_VDSO) ||
-				vma_entry_is(vma, VMA_AREA_VVAR))
-			return false;
+		if (vma_entry_is(vma, VMA_AREA_VDSO))
+			had_vdso = true;
+		if (vma_entry_is(vma, VMA_AREA_VVAR))
+			had_vvar = true;
 	}
+
+	if (had_vdso && (rt->vdso_start == VDSO_BAD_ADDR)) {
+		pr_err("Task had vdso, restorer doesn't\n");
+		return false;
+	}
+
+	/*
+	 * There is a use-case for restoring vvar alone: valgrind (see #488).
+	 * On the other side, we expect that vvar is touched by application
+	 * only from vdso. So, we can put a stale page and proceed restore
+	 * if kernel doesn't provide vvar [but provides vdso, if needede.
+	 * Just warn aloud that we don't like it.
+	 */
+	if (had_vvar && (rt->vvar_start == VVAR_BAD_ADDR))
+		pr_warn("Can't restore vvar - continuing regardless\n");
 
 	return true;
 }
 
-static bool vdso_needs_parking(struct task_restore_args *args)
+static inline int restore_child_subreaper(int child_subreaper)
 {
-	/* Compatible vDSO will be mapped, not moved */
-	if (args->compatible_mode)
-		return false;
+	int ret;
 
-	if (args->can_map_vdso)
-		return false;
+	if (!child_subreaper)
+		return 0;
 
-	return !vdso_unmapped(args);
+	ret = sys_prctl(PR_SET_CHILD_SUBREAPER, child_subreaper, 0, 0, 0);
+	if (ret) {
+		pr_err("Unable to set PR_SET_CHILD_SUBREAPER(%d): %d\n", child_subreaper, ret);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int map_vdso(struct task_restore_args *args, bool compatible)
+{
+	struct vdso_maps *rt = &args->vdso_maps_rt;
+	int err;
+
+	err = arch_map_vdso(args->vdso_rt_parked_at, compatible);
+	if (err < 0) {
+		pr_err("Failed to map vdso %d\n", err);
+		return err;
+	}
+
+	/* kernel may provide only vdso */
+	if (rt->sym.vvar_size == VVAR_BAD_SIZE) {
+		rt->vdso_start = args->vdso_rt_parked_at;
+		rt->vvar_start = VVAR_BAD_ADDR;
+		return 0;
+	}
+
+	if (rt->sym.vdso_before_vvar) {
+		rt->vdso_start = args->vdso_rt_parked_at;
+		rt->vvar_start = rt->vdso_start + rt->sym.vdso_size;
+	} else {
+		rt->vvar_start = args->vdso_rt_parked_at;
+		rt->vdso_start = rt->vvar_start + rt->sym.vvar_size;
+	}
+
+	return 0;
+}
+
+static int fd_poll(int inotify_fd)
+{
+	struct pollfd pfd = {inotify_fd, POLLIN, 0};
+	struct timespec tmo = {0, 0};
+
+	return sys_ppoll(&pfd, 1, &tmo, NULL, sizeof(sigset_t));
+}
+
+/*
+ * note: Actually kernel may want even more space for one event (see
+ * round_event_name_len), so using buffer of EVENT_BUFF_SIZE size may fail.
+ * To be on the safe side - take a bigger buffer, and these also allows to
+ * read more events in one syscall.
+ */
+#define EVENT_BUFF_SIZE ((sizeof(struct inotify_event) + PATH_MAX))
+
+/*
+ * Read all available events from inotify queue
+ */
+static int cleanup_inotify_events(int inotify_fd)
+{
+	char buf[EVENT_BUFF_SIZE * 8];
+	int ret;
+
+	while (1) {
+		ret = fd_poll(inotify_fd);
+		if (ret < 0) {
+			pr_err("Failed to poll from inotify fd: %d\n", ret);
+			return -1;
+		} else if (ret == 0) {
+			break;
+		}
+
+		ret = sys_read(inotify_fd, buf, sizeof(buf));
+		if (ret < 0) {
+			pr_err("Failed to read inotify events\n");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * When we restore inotifies we can open and close files we create a watch
+ * for. So wee need to cleanup these auxiliary events which we've generated.
+ *
+ * note: For now we don't have a way to c/r events in queue but we need to
+ * at least leave the queue clean from events generated by our own.
+ */
+int cleanup_current_inotify_events(struct task_restore_args *task_args)
+{
+	int i;
+
+	for (i = 0; i < task_args->inotify_fds_n; i++) {
+		int inotify_fd = task_args->inotify_fds[i];
+
+		pr_debug("Cleaning inotify events from %d\n", inotify_fd);
+
+		if (cleanup_inotify_events(inotify_fd))
+			return -1;
+	}
+
+	return 0;
 }
 
 /*
@@ -1216,13 +1397,12 @@ long __export_restore_task(struct task_restore_args *args)
 	k_rtsigset_t to_block;
 	pid_t my_pid = sys_getpid();
 	rt_sigaction_t act;
+	bool has_vdso_proxy;
 
 	bootstrap_start = args->bootstrap_start;
 	bootstrap_len	= args->bootstrap_len;
 
-#ifdef CONFIG_VDSO
 	vdso_rt_size	= args->vdso_rt_size;
-#endif
 
 	fi_strategy = args->fault_strategy;
 
@@ -1240,11 +1420,19 @@ long __export_restore_task(struct task_restore_args *args)
 	act.rt_sa_handler = sigchld_handler;
 	act.rt_sa_flags = SA_SIGINFO | SA_RESTORER | SA_RESTART;
 	act.rt_sa_restorer = cr_restore_rt;
-	sys_sigaction(SIGCHLD, &act, NULL, sizeof(k_rtsigset_t));
+	ret = sys_sigaction(SIGCHLD, &act, NULL, sizeof(k_rtsigset_t));
+	if (ret) {
+		pr_err("Failed to set SIGCHLD %ld\n", ret);
+		goto core_restore_end;
+	}
 
 	ksigemptyset(&to_block);
 	ksigaddset(&to_block, SIGCHLD);
 	ret = sys_sigprocmask(SIG_UNBLOCK, &to_block, NULL, sizeof(k_rtsigset_t));
+	if (ret) {
+		pr_err("Failed to unblock SIGCHLD %ld\n", ret);
+		goto core_restore_end;
+	}
 
 	std_log_set_fd(args->logfd);
 	std_log_set_loglevel(args->loglevel);
@@ -1256,7 +1444,21 @@ long __export_restore_task(struct task_restore_args *args)
 		pr_debug("lazy-pages: uffd %d\n", args->uffd);
 	}
 
-	if (vdso_needs_parking(args)) {
+	/*
+	 * Park vdso/vvar in a safe place if architecture doesn't support
+	 * mapping them with arch_prctl().
+	 * Always preserve/map rt-vdso pair if it's possible, regardless
+	 * it's presence in original task: vdso will be used for fast
+	 * getttimeofday() in restorer's log timings.
+	 */
+	if (!args->can_map_vdso) {
+		/* It's already checked in kdat, but let's check again */
+		if (args->compatible_mode) {
+			pr_err("Compatible mode without vdso map support\n");
+			goto core_restore_end;
+		}
+		if (!can_restore_vdso(args))
+			goto core_restore_end;
 		if (vdso_do_park(&args->vdso_maps_rt,
 				args->vdso_rt_parked_at, vdso_rt_size))
 			goto core_restore_end;
@@ -1267,12 +1469,10 @@ long __export_restore_task(struct task_restore_args *args)
 		goto core_restore_end;
 
 	/* Map vdso that wasn't parked */
-	if (!vdso_unmapped(args) && args->can_map_vdso) {
-		if (arch_map_vdso(args->vdso_rt_parked_at,
-				args->compatible_mode) < 0) {
-			goto core_restore_end;
-		}
-	}
+	if (args->can_map_vdso && (map_vdso(args, args->compatible_mode) < 0))
+		goto core_restore_end;
+
+	vdso_update_gtod_addr(&args->vdso_maps_rt);
 
 	/* Shift private vma-s to the left */
 	for (i = 0; i < args->vmas_n; i++) {
@@ -1311,8 +1511,10 @@ long __export_restore_task(struct task_restore_args *args)
 	if (args->uffd > -1) {
 		/* re-enable THP if we disabled it previously */
 		if (args->has_thp_enabled) {
-			if (sys_prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0)) {
-				pr_err("Cannot re-enable THP\n");
+			int ret;
+			ret = sys_prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0);
+			if (ret) {
+				pr_err("Cannot re-enable THP: %d\n", ret);
 				goto core_restore_end;
 			}
 		}
@@ -1368,6 +1570,15 @@ long __export_restore_task(struct task_restore_args *args)
 			}
 
 			pr_debug("`- returned %ld\n", (long)r);
+			/* If the file is open for writing, then it means we should punch holes
+			 * in it. */
+			if (r > 0 && args->auto_dedup) {
+				int fr = sys_fallocate(args->vma_ios_fd, FALLOC_FL_KEEP_SIZE|FALLOC_FL_PUNCH_HOLE,
+					rio->off, r);
+				if (fr < 0) {
+					pr_debug("Failed to punch holes with fallocate: %d\n", fr);
+				}
+			}
 			rio->off += r;
 			/* Advance the iovecs */
 			do {
@@ -1390,15 +1601,17 @@ long __export_restore_task(struct task_restore_args *args)
 
 	sys_close(args->vma_ios_fd);
 
-#ifdef CONFIG_VDSO
 	/*
 	 * Proxify vDSO.
 	 */
-	if (vdso_proxify(&args->vdso_maps_rt.sym, args->vdso_rt_parked_at,
-		     args->vmas, args->vmas_n, args->compatible_mode,
-		     fault_injected(FI_VDSO_TRAMPOLINES)))
+	if (vdso_proxify(&args->vdso_maps_rt,  &has_vdso_proxy,
+			 args->vmas, args->vmas_n, args->compatible_mode,
+		         fault_injected(FI_VDSO_TRAMPOLINES)))
 		goto core_restore_end;
-#endif
+
+	/* unmap rt-vdso with restorer blob after restore's finished */
+	if (!has_vdso_proxy)
+		vdso_rt_size = 0;
 
 	/*
 	 * Walk though all VMAs again to drop PROT_WRITE
@@ -1455,8 +1668,6 @@ long __export_restore_task(struct task_restore_args *args)
 		}
 	}
 
-	ret = 0;
-
 	/*
 	 * Tune up the task fields.
 	 */
@@ -1467,7 +1678,7 @@ long __export_restore_task(struct task_restore_args *args)
 	/*
 	 * New kernel interface with @PR_SET_MM_MAP will become
 	 * more widespread once kernel get deployed over the world.
-	 * Thus lets be opportunistic and use new inteface as a try.
+	 * Thus lets be opportunistic and use new interface as a try.
 	 */
 	prctl_map = (struct prctl_mm_map) {
 		.start_code	= args->mm.mm_start_code,
@@ -1516,6 +1727,14 @@ long __export_restore_task(struct task_restore_args *args)
 	if (ret)
 		goto core_restore_end;
 
+	/* SELinux (1) process context needs to be set before creating threads. */
+	if (args->lsm_type == LSMTYPE__SELINUX) {
+		/* Only for SELinux */
+		if (lsm_set_label(args->t->creds_args->lsm_profile,
+				  "current", args->proc_fd) < 0)
+			goto core_restore_end;
+	}
+
 	/*
 	 * We need to prepare a valid sigframe here, so
 	 * after sigreturn the kernel will pick up the
@@ -1551,20 +1770,16 @@ long __export_restore_task(struct task_restore_args *args)
 				   CLONE_THREAD | CLONE_SYSVSEM | CLONE_FS;
 		long last_pid_len;
 		long parent_tid;
-		int i, fd;
+		int i, fd = -1;
 
+		/* One level pid ns hierarhy */
 		fd = sys_openat(args->proc_fd, LAST_PID_PATH, O_RDWR, 0);
 		if (fd < 0) {
 			pr_err("can't open last pid fd %d\n", fd);
 			goto core_restore_end;
 		}
 
-		ret = sys_flock(fd, LOCK_EX);
-		if (ret) {
-			pr_err("Can't lock last_pid %d\n", fd);
-			sys_close(fd);
-			goto core_restore_end;
-		}
+		mutex_lock(&task_entries_local->last_pid_mutex);
 
 		for (i = 0; i < args->nr_threads; i++) {
 			char last_pid_buf[16], *s;
@@ -1580,6 +1795,7 @@ long __export_restore_task(struct task_restore_args *args)
 			if (ret < 0) {
 				pr_err("Can't set last_pid %ld/%s\n", ret, last_pid_buf);
 				sys_close(fd);
+				mutex_unlock(&task_entries_local->last_pid_mutex);
 				goto core_restore_end;
 			}
 
@@ -1593,18 +1809,14 @@ long __export_restore_task(struct task_restore_args *args)
 			RUN_CLONE_RESTORE_FN(ret, clone_flags, new_sp, parent_tid, thread_args, args->clone_restore_fn);
 			if (ret != thread_args[i].pid) {
 				pr_err("Unable to create a thread: %ld\n", ret);
+				mutex_unlock(&task_entries_local->last_pid_mutex);
 				goto core_restore_end;
 			}
 		}
 
-		ret = sys_flock(fd, LOCK_UN);
-		if (ret) {
-			pr_err("Can't unlock last_pid %ld\n", ret);
+		mutex_unlock(&task_entries_local->last_pid_mutex);
+		if (fd >= 0)
 			sys_close(fd);
-			goto core_restore_end;
-		}
-
-		sys_close(fd);
 	}
 
 	restore_rlims(args);
@@ -1625,6 +1837,9 @@ long __export_restore_task(struct task_restore_args *args)
 
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE);
 
+	if (cleanup_current_inotify_events(args))
+		goto core_restore_end;
+
 	if (wait_helpers(args) < 0)
 		goto core_restore_end;
 	if (wait_zombies(args) < 0)
@@ -1638,7 +1853,7 @@ long __export_restore_task(struct task_restore_args *args)
 	}
 
 	if (!args->compatible_mode) {
-		sys_sigaction(SIGCHLD, &args->sigchld_act,
+		ret = sys_sigaction(SIGCHLD, &args->sigchld_act,
 				NULL, sizeof(k_rtsigset_t));
 	} else {
 		void *stack = alloc_compat_syscall_stack();
@@ -1647,9 +1862,13 @@ long __export_restore_task(struct task_restore_args *args)
 			pr_err("Failed to allocate 32-bit stack for sigaction\n");
 			goto core_restore_end;
 		}
-		arch_compat_rt_sigaction(stack, SIGCHLD,
+		ret = arch_compat_rt_sigaction(stack, SIGCHLD,
 				(void*)&args->sigchld_act);
 		free_compat_syscall_stack(stack);
+	}
+	if (ret) {
+		pr_err("Failed to restore SIGCHLD: %ld\n", ret);
+		goto core_restore_end;
 	}
 
 	ret = restore_signals(args->siginfo, args->siginfo_n, true);
@@ -1676,9 +1895,11 @@ long __export_restore_task(struct task_restore_args *args)
 	 * turning off TCP repair is CAP_SYS_NED_ADMIN protected,
 	 * thus restore* creds _after_ all of the above.
 	 */
-	ret = restore_creds(args->t->creds_args, args->proc_fd);
+	ret = restore_creds(args->t->creds_args, args->proc_fd,
+			    args->lsm_type);
 	ret = ret || restore_dumpable_flag(&args->mm);
 	ret = ret || restore_pdeath_sig(args->t);
+	ret = ret || restore_child_subreaper(args->child_subreaper);
 
 	futex_set_and_wake(&thread_inprogress, args->nr_threads);
 
@@ -1694,7 +1915,7 @@ long __export_restore_task(struct task_restore_args *args)
 	std_log_set_fd(-1);
 
 	/*
-	 * The code that prepared the itimers makes shure the
+	 * The code that prepared the itimers makes sure that the
 	 * code below doesn't fail due to bad timing values.
 	 */
 

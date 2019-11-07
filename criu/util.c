@@ -5,11 +5,8 @@
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
-#include <limits.h>
 #include <signal.h>
 #include <unistd.h>
-#include <errno.h>
-#include <string.h>
 #include <dirent.h>
 #include <sys/sendfile.h>
 #include <fcntl.h>
@@ -19,28 +16,21 @@
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/ptrace.h>
-#include <sys/types.h>
-#include <sys/time.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <sys/vfs.h>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sched.h>
 #include <ctype.h>
 
-#include "bitops.h"
+#include "kerndat.h"
 #include "page.h"
-#include "common/compiler.h"
-#include "common/list.h"
 #include "util.h"
-#include "rst-malloc.h"
 #include "image.h"
 #include "vma.h"
 #include "mem.h"
@@ -49,7 +39,6 @@
 
 #include "clone-noasan.h"
 #include "cr_options.h"
-#include "servicefd.h"
 #include "cr-service.h"
 #include "files.h"
 #include "pstree.h"
@@ -241,23 +230,19 @@ int reopen_fd_as_safe(char *file, int line, int new_fd, int old_fd, bool allow_r
 	int tmp;
 
 	if (old_fd != new_fd) {
-		/* make sure we won't clash with an inherit fd */
-		if (inherit_fd_resolve_clash(new_fd) < 0)
-			return -1;
-
-		if (!allow_reuse_fd) {
-			if (fcntl(new_fd, F_GETFD) != -1 || errno != EBADF) {
-				pr_err("fd %d already in use (called at %s:%d)\n",
-					new_fd, file, line);
-				return -1;
-			}
-		}
-
-		tmp = dup2(old_fd, new_fd);
+		if (!allow_reuse_fd)
+			tmp = fcntl(old_fd, F_DUPFD, new_fd);
+		else
+			tmp = dup2(old_fd, new_fd);
 		if (tmp < 0) {
 			pr_perror("Dup %d -> %d failed (called at %s:%d)",
 				  old_fd, new_fd, file, line);
 			return tmp;
+		} else if (tmp != new_fd) {
+			close(tmp);
+			pr_err("fd %d already in use (called at %s:%d)\n",
+				new_fd, file, line);
+			return -1;
 		}
 
 		/* Just to have error message if failed */
@@ -314,7 +299,6 @@ static inline int set_proc_pid_fd(int pid, int fd)
 
 	open_proc_pid = pid;
 	ret = install_service_fd(PROC_PID_FD_OFF, fd);
-	close(fd);
 
 	return ret;
 }
@@ -348,7 +332,7 @@ void close_proc()
 
 int set_proc_fd(int fd)
 {
-	if (install_service_fd(PROC_FD_OFF, fd) < 0)
+	if (install_service_fd(PROC_FD_OFF, dup(fd)) < 0)
 		return -1;
 	return 0;
 }
@@ -365,7 +349,6 @@ static int open_proc_sfd(char *path)
 	}
 
 	ret = install_service_fd(PROC_FD_OFF, fd);
-	close(fd);
 	if (ret < 0)
 		return -1;
 
@@ -432,225 +415,6 @@ int do_open_proc(pid_t pid, int flags, const char *fmt, ...)
 	va_end(args);
 
 	return openat(dirfd, path, flags);
-}
-
-/* Max potentially possible fd to be open by criu process */
-int service_fd_rlim_cur;
-/* Base of current process service fds set */
-static int service_fd_base;
-/* Id of current process in shared fdt */
-static int service_fd_id = 0;
-
-int init_service_fd(void)
-{
-	struct rlimit64 rlimit;
-
-	/*
-	 * Service FDs are those that most likely won't
-	 * conflict with any 'real-life' ones
-	 */
-
-	if (syscall(__NR_prlimit64, getpid(), RLIMIT_NOFILE, NULL, &rlimit)) {
-		pr_perror("Can't get rlimit");
-		return -1;
-	}
-
-	service_fd_rlim_cur = (int)rlimit.rlim_cur;
-	service_fd_base = service_fd_rlim_cur;
-	BUG_ON(service_fd_base < SERVICE_FD_MAX);
-
-	return 0;
-}
-
-static int __get_service_fd(enum sfd_type type, int service_fd_id)
-{
-	return service_fd_base - type - SERVICE_FD_MAX * service_fd_id;
-}
-
-int service_fd_min_fd(struct pstree_item *item)
-{
-	struct fdt *fdt = rsti(item)->fdt;
-	int id = 0;
-
-	if (fdt)
-		id = fdt->nr - 1;
-	return service_fd_rlim_cur - (SERVICE_FD_MAX - 1) - SERVICE_FD_MAX * id;
-}
-
-static DECLARE_BITMAP(sfd_map, SERVICE_FD_MAX);
-/*
- * Variable for marking areas of code, where service fds modifications
- * are prohibited. It's used to safe them from reusing their numbers
- * by ordinary files. See install_service_fd() and close_service_fd().
- */
-bool sfds_protected = false;
-
-static void sfds_protection_bug(enum sfd_type type)
-{
-	pr_err("Service fd %u is being modified in protected context\n", type);
-	print_stack_trace(current ? vpid(current) : 0);
-	BUG();
-}
-
-int install_service_fd(enum sfd_type type, int fd)
-{
-	int sfd = __get_service_fd(type, service_fd_id);
-
-	BUG_ON((int)type <= SERVICE_FD_MIN || (int)type >= SERVICE_FD_MAX);
-	if (sfds_protected && !test_bit(type, sfd_map))
-		sfds_protection_bug(type);
-
-	if (dup3(fd, sfd, O_CLOEXEC) != sfd) {
-		pr_perror("Dup %d -> %d failed", fd, sfd);
-		return -1;
-	}
-
-	set_bit(type, sfd_map);
-	return sfd;
-}
-
-int get_service_fd(enum sfd_type type)
-{
-	BUG_ON((int)type <= SERVICE_FD_MIN || (int)type >= SERVICE_FD_MAX);
-
-	if (!test_bit(type, sfd_map))
-		return -1;
-
-	return __get_service_fd(type, service_fd_id);
-}
-
-int criu_get_image_dir(void)
-{
-	return get_service_fd(IMG_FD_OFF);
-}
-
-int close_service_fd(enum sfd_type type)
-{
-	int fd;
-
-	if (sfds_protected)
-		sfds_protection_bug(type);
-
-	fd = get_service_fd(type);
-	if (fd < 0)
-		return 0;
-
-	if (close_safe(&fd))
-		return -1;
-
-	clear_bit(type, sfd_map);
-	return 0;
-}
-
-static void move_service_fd(struct pstree_item *me, int type, int new_id, int new_base)
-{
-	int old = get_service_fd(type);
-	int new = new_base - type - SERVICE_FD_MAX * new_id;
-	int ret;
-
-	if (old < 0)
-		return;
-	ret = dup2(old, new);
-	if (ret == -1) {
-		if (errno != EBADF)
-			pr_perror("Unable to clone %d->%d", old, new);
-	} else if (!(rsti(me)->clone_flags & CLONE_FILES))
-		close(old);
-}
-
-static int choose_service_fd_base(struct pstree_item *me)
-{
-	int nr, real_nr, fdt_nr = 1, id = rsti(me)->service_fd_id;
-
-	if (rsti(me)->fdt) {
-		/* The base is set by owner of fdt (id 0) */
-		if (id != 0)
-			return service_fd_base;
-		fdt_nr = rsti(me)->fdt->nr;
-	}
-	/* Now find process's max used fd number */
-	if (!list_empty(&rsti(me)->fds))
-		nr = list_entry(rsti(me)->fds.prev,
-				struct fdinfo_list_entry, ps_list)->fe->fd;
-	else
-		nr = -1;
-
-	nr = max(nr, inh_fd_max);
-	/*
-	 * Service fds go after max fd near right border of alignment:
-	 *
-	 * ...|max_fd|max_fd+1|...|sfd first|...|sfd last (aligned)|
-	 *
-	 * So, they take maximum numbers of area allocated by kernel.
-	 * See linux alloc_fdtable() for details.
-	 */
-	nr += (SERVICE_FD_MAX - SERVICE_FD_MIN) * fdt_nr;
-	nr += 16; /* Safety pad */
-	real_nr = nr;
-
-	nr /= (1024 / sizeof(void *));
-	if (nr)
-		nr = 1 << (32 - __builtin_clz(nr));
-	else
-		nr = 1;
-	nr *= (1024 / sizeof(void *));
-
-	if (nr > service_fd_rlim_cur) {
-		/* Right border is bigger, than rlim. OK, then just aligned value is enough */
-		nr = round_down(service_fd_rlim_cur, (1024 / sizeof(void *)));
-		if (nr < real_nr) {
-			pr_err("Can't chose service_fd_base: %d %d\n", nr, real_nr);
-			return -1;
-		}
-	}
-
-	return nr;
-}
-
-int clone_service_fd(struct pstree_item *me)
-{
-	int id, new_base, i, ret = -1;
-
-	new_base = choose_service_fd_base(me);
-	id = rsti(me)->service_fd_id;
-
-	if (new_base == -1)
-		return -1;
-	if (service_fd_base == new_base && service_fd_id == id)
-		return 0;
-
-	/* Dup sfds in memmove() style: they may overlap */
-	if (get_service_fd(LOG_FD_OFF) < new_base - LOG_FD_OFF - SERVICE_FD_MAX * id)
-		for (i = SERVICE_FD_MIN + 1; i < SERVICE_FD_MAX; i++)
-			move_service_fd(me, i, id, new_base);
-	else
-		for (i = SERVICE_FD_MAX - 1; i > SERVICE_FD_MIN; i--)
-			move_service_fd(me, i, id, new_base);
-
-	service_fd_base = new_base;
-	service_fd_id = id;
-	ret = 0;
-
-	return ret;
-}
-
-bool is_any_service_fd(int fd)
-{
-	int sfd_min_fd = __get_service_fd(SERVICE_FD_MAX, service_fd_id);
-	int sfd_max_fd = __get_service_fd(SERVICE_FD_MIN, service_fd_id);
-
-	if (fd > sfd_min_fd && fd < sfd_max_fd) {
-		int type = SERVICE_FD_MAX - (fd - sfd_min_fd);
-		if (type > SERVICE_FD_MIN && type < SERVICE_FD_MAX)
-			return !!test_bit(type, sfd_map);
-	}
-
-	return false;
-}
-
-bool is_service_fd(int fd, enum sfd_type type)
-{
-	return fd == get_service_fd(type);
 }
 
 int copy_file(int fd_in, int fd_out, size_t bytes)
@@ -729,6 +493,39 @@ int cr_system(int in, int out, int err, char *cmd, char *const argv[], unsigned 
 	return cr_system_userns(in, out, err, cmd, argv, flags, -1);
 }
 
+static int close_fds(int minfd)
+{
+	DIR *dir;
+	struct dirent *de;
+	int fd, ret, dfd;
+
+	dir = opendir("/proc/self/fd");
+	if (dir == NULL) {
+		pr_perror("Can't open /proc/self/fd");
+		return -1;
+	}
+	dfd = dirfd(dir);
+
+	while ((de = readdir(dir))) {
+		if (dir_dots(de))
+			continue;
+
+		ret = sscanf(de->d_name, "%d", &fd);
+		if (ret != 1) {
+			pr_err("Can't parse %s\n", de->d_name);
+			return -1;
+		}
+		if (dfd == fd)
+			continue;
+		if (fd < minfd)
+			continue;
+		close(fd);
+	}
+	closedir(dir);
+
+	return 0;
+}
+
 int cr_system_userns(int in, int out, int err, char *cmd,
 			char *const argv[], unsigned flags, int userns_pid)
 {
@@ -792,6 +589,8 @@ int cr_system_userns(int in, int out, int err, char *cmd,
 		if (reopen_fd_as_nocheck(STDERR_FILENO, err))
 			goto out_chld;
 
+		close_fds(STDERR_FILENO + 1);
+
 		execvp(cmd, argv);
 
 		pr_perror("exec(%s, ...) failed", cmd);
@@ -846,7 +645,7 @@ int close_status_fd(void)
 	return close_safe(&opts.status_fd);
 }
 
-int cr_daemon(int nochdir, int noclose, int *keep_fd, int close_fd)
+int cr_daemon(int nochdir, int noclose, int close_fd)
 {
 	int pid;
 
@@ -868,16 +667,6 @@ int cr_daemon(int nochdir, int noclose, int *keep_fd, int close_fd)
 
 		if (close_fd != -1)
 			close(close_fd);
-
-		if ((*keep_fd != -1) && (*keep_fd != 3)) {
-			fd = dup2(*keep_fd, 3);
-			if (fd < 0) {
-				pr_perror("Dup2 failed");
-				return -1;
-			}
-			close(*keep_fd);
-			*keep_fd = fd;
-		}
 
 		fd = open("/dev/null", O_RDWR);
 		if (fd < 0) {
@@ -1067,6 +856,12 @@ void split(char *str, char token, char ***out, int *n)
 		cur++;
 	}
 
+	if (*n == 0) {
+		/* This can only happen if str == NULL */
+		*out = NULL;
+		*n = -1;
+		return;
+	}
 
 	*out = xmalloc((*n) * sizeof(char *));
 	if (!*out) {
@@ -1114,6 +909,24 @@ int fd_has_data(int lfd)
 	}
 
 	return ret;
+}
+
+void fd_set_nonblocking(int fd, bool on)
+{
+	int flags = fcntl(fd, F_GETFL, NULL);
+
+	if (flags < 0) {
+		pr_perror("Failed to obtain flags from fd %d", fd);
+		return;
+	}
+
+	if (on)
+		flags |= O_NONBLOCK;
+	else
+		flags &= (~O_NONBLOCK);
+
+	if (fcntl(fd, F_SETFL, flags) < 0)
+		pr_perror("Failed to set flags for fd %d", fd);
 }
 
 int make_yard(char *path)
@@ -1237,7 +1050,8 @@ void print_data(unsigned long addr, unsigned char *data, size_t size)
 	}
 }
 
-static int get_sockaddr_in(struct sockaddr_storage *addr, char *host)
+static int get_sockaddr_in(struct sockaddr_storage *addr, char *host,
+			unsigned short port)
 {
 	memset(addr, 0, sizeof(*addr));
 
@@ -1249,36 +1063,44 @@ static int get_sockaddr_in(struct sockaddr_storage *addr, char *host)
 	} else if (inet_pton(AF_INET6, host, &((struct sockaddr_in6 *)addr)->sin6_addr)) {
 		addr->ss_family = AF_INET6;
 	} else {
-		pr_perror("Bad server address");
+		pr_err("Invalid server address \"%s\". "
+		"The address must be in IPv4 or IPv6 format.\n", host);
 		return -1;
 	}
 
 	if (addr->ss_family == AF_INET6) {
-		((struct sockaddr_in6 *)addr)->sin6_port = htons(opts.port);
+		((struct sockaddr_in6 *)addr)->sin6_port = htons(port);
 	} else if (addr->ss_family == AF_INET) {
-		((struct sockaddr_in *)addr)->sin_port = htons(opts.port);
+		((struct sockaddr_in *)addr)->sin_port = htons(port);
 	}
 
 	return 0;
 }
 
-int setup_tcp_server(char *type)
+int setup_tcp_server(char *type, char *addr, unsigned short *port)
 {
 	int sk = -1;
+	int sockopt = 1;
 	struct sockaddr_storage saddr;
 	socklen_t slen = sizeof(saddr);
 
-	if (get_sockaddr_in(&saddr, opts.addr)) {
+	if (get_sockaddr_in(&saddr, addr, (*port))) {
 		return -1;
 	}
 
-	pr_info("Starting %s server on port %u\n", type, opts.port);
+	pr_info("Starting %s server on port %u\n", type, *port);
 
 	sk = socket(saddr.ss_family, SOCK_STREAM, IPPROTO_TCP);
 
 	if (sk < 0) {
 		pr_perror("Can't init %s server", type);
 		return -1;
+	}
+
+	if (setsockopt(
+		sk, SOL_SOCKET, SO_REUSEADDR, &sockopt, sizeof(sockopt)) == -1) {
+		pr_perror("Unable to set SO_REUSEADDR");
+		goto out;
 	}
 
 	if (bind(sk, (struct sockaddr *)&saddr, slen)) {
@@ -1292,19 +1114,19 @@ int setup_tcp_server(char *type)
 	}
 
 	/* Get socket port in case of autobind */
-	if (opts.port == 0) {
+	if ((*port) == 0) {
 		if (getsockname(sk, (struct sockaddr *)&saddr, &slen)) {
 			pr_perror("Can't get %s server name", type);
 			goto out;
 		}
 
 		if (saddr.ss_family == AF_INET6) {
-			opts.port = ntohs(((struct sockaddr_in *)&saddr)->sin_port);
+			(*port) = ntohs(((struct sockaddr_in *)&saddr)->sin_port);
 		} else if (saddr.ss_family == AF_INET) {
-			opts.port = ntohs(((struct sockaddr_in6 *)&saddr)->sin6_port);
+			(*port) = ntohs(((struct sockaddr_in6 *)&saddr)->sin6_port);
 		}
 
-		pr_info("Using %u port\n", opts.port);
+		pr_info("Using %u port\n", (*port));
 	}
 
 	return sk;
@@ -1320,10 +1142,10 @@ int run_tcp_server(bool daemon_mode, int *ask, int cfd, int sk)
 	socklen_t clen = sizeof(caddr);
 
 	if (daemon_mode) {
-		ret = cr_daemon(1, 0, ask, cfd);
+		ret = cr_daemon(1, 0, cfd);
 		if (ret == -1) {
 			pr_err("Can't run in the background\n");
-			goto out;
+			goto err;
 		}
 		if (ret > 0) { /* parent task, daemon started */
 			close_safe(&sk);
@@ -1344,10 +1166,11 @@ int run_tcp_server(bool daemon_mode, int *ask, int cfd, int sk)
 		return -1;
 
 	if (sk >= 0) {
-		ret = *ask = accept(sk, (struct sockaddr *)&caddr, &clen);
-		if (*ask < 0)
+		*ask = accept(sk, (struct sockaddr *)&caddr, &clen);
+		if (*ask < 0) {
 			pr_perror("Can't accept connection to server");
-		else
+			goto err;
+		} else
 			pr_info("Accepted connection from %s:%u\n",
 					inet_ntoa(caddr.sin_addr),
 					(int)ntohs(caddr.sin_port));
@@ -1355,33 +1178,71 @@ int run_tcp_server(bool daemon_mode, int *ask, int cfd, int sk)
 	}
 
 	return 0;
-out:
+err:
 	close(sk);
 	return -1;
 }
 
-int setup_tcp_client(char *addr)
+int setup_tcp_client(char *hostname)
 {
 	struct sockaddr_storage saddr;
-	int sk;
+	struct addrinfo addr_criteria, *addr_list, *p;
+	char ipstr[INET6_ADDRSTRLEN];
+	int sk = -1;
+	void *ip;
 
-	pr_info("Connecting to server %s:%u\n", addr, opts.port);
+	memset(&addr_criteria, 0, sizeof(addr_criteria));
+	addr_criteria.ai_family = AF_UNSPEC;
+	addr_criteria.ai_socktype = SOCK_STREAM;
+	addr_criteria.ai_protocol = IPPROTO_TCP;
 
-	if (get_sockaddr_in(&saddr, addr))
-		return -1;
-
-	sk = socket(saddr.ss_family, SOCK_STREAM, IPPROTO_TCP);
-	if (sk < 0) {
-		pr_perror("Can't create socket");
-		return -1;
+	/*
+	 * addr_list contains a list of addrinfo structures that corresponding
+	 * to the criteria specified in hostname and addr_criteria.
+	 */
+	if (getaddrinfo(hostname, NULL, &addr_criteria, &addr_list)) {
+		pr_perror("Failed to resolve hostname: %s", hostname);
+		goto out;
 	}
 
-	if (connect(sk, (struct sockaddr *)&saddr, sizeof(saddr)) < 0) {
-		pr_perror("Can't connect to server");
-		close(sk);
-		return -1;
+	/*
+	 * Iterate through addr_list and try to connect. The loop stops if the
+	 * connection is successful or we reach the end of the list.
+	 */
+	for(p = addr_list; p != NULL; p = p->ai_next) {
+
+		if (p->ai_family == AF_INET) {
+			struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
+			ip = &(ipv4->sin_addr);
+		} else {
+			struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
+			ip = &(ipv6->sin6_addr);
+		}
+
+		inet_ntop(p->ai_family, ip, ipstr, sizeof(ipstr));
+		pr_info("Connecting to server %s:%u\n", ipstr, opts.port);
+
+		if (get_sockaddr_in(&saddr, ipstr, opts.port))
+			goto out;
+
+		sk = socket(saddr.ss_family, SOCK_STREAM, IPPROTO_TCP);
+		if (sk < 0) {
+			pr_perror("Can't create socket");
+			goto out;
+		}
+
+		if (connect(sk, (struct sockaddr *)&saddr, sizeof(saddr)) < 0) {
+			pr_info("Can't connect to server %s:%u\n", ipstr, opts.port);
+			close(sk);
+			sk = -1;
+		} else {
+			/* Connected successfully */
+			break;
+		}
 	}
 
+out:
+	freeaddrinfo(addr_list);
 	return sk;
 }
 
@@ -1521,6 +1382,23 @@ out:
 	close_pid_proc();
 	return ret;
 }
+
+void rlimit_unlimit_nofile(void)
+{
+	struct rlimit new;
+
+	new.rlim_cur = kdat.sysctl_nr_open;
+	new.rlim_max = kdat.sysctl_nr_open;
+
+	if (prlimit(getpid(), RLIMIT_NOFILE, &new, NULL)) {
+		pr_perror("rlimit: Can't setup RLIMIT_NOFILE for self");
+		return;
+	} else
+		pr_debug("rlimit: RLIMIT_NOFILE unlimited for self\n");
+
+	service_fd_rlim_cur = kdat.sysctl_nr_open;
+}
+
 
 #ifdef __GLIBC__
 #include <execinfo.h>

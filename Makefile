@@ -35,7 +35,7 @@ endif
 # Architecture specific options.
 ifeq ($(ARCH),arm)
         ARMV		:= $(shell echo $(UNAME-M) | sed -nr 's/armv([[:digit:]]).*/\1/p; t; i7')
-        DEFINES		:= -DCONFIG_ARMV$(ARMV)
+        DEFINES		:= -DCONFIG_ARMV$(ARMV) -DCONFIG_VDSO_32
 
         ifeq ($(ARMV),6)
                 USERCFLAGS += -march=armv6
@@ -46,22 +46,26 @@ ifeq ($(ARCH),arm)
         endif
 
         PROTOUFIX	:= y
+	# For simplicity - compile code in Arm mode without interwork.
+	# We could choose Thumb mode as default instead - but a dirty
+	# experiment shows that with 90Kb PIEs Thumb code doesn't save
+	# even one page. So, let's stick so far to Arm mode as it's more
+	# universal around all different Arm variations, until someone
+	# will find any use for Thumb mode. -dima
+        CFLAGS_PIE	:= -marm
 endif
 
 ifeq ($(ARCH),aarch64)
-        VDSO		:= y
         DEFINES		:= -DCONFIG_AARCH64
 endif
 
 ifeq ($(ARCH),ppc64)
         LDARCH		:= powerpc:common64
-        VDSO		:= y
         DEFINES		:= -DCONFIG_PPC64 -D__SANE_USERSPACE_TYPES__
 endif
 
 ifeq ($(ARCH),x86)
         LDARCH		:= i386:x86-64
-        VDSO		:= y
         DEFINES		:= -DCONFIG_X86_64
 endif
 
@@ -74,14 +78,15 @@ endif
 ifeq ($(ARCH),s390)
         ARCH		:= s390
         SRCARCH		:= s390
-        VDSO		:= y
         DEFINES		:= -DCONFIG_S390
         CFLAGS_PIE	:= -fno-optimize-sibling-calls
 endif
+
+CFLAGS_PIE		+= -DCR_NOGLIBC
 export CFLAGS_PIE
 
 LDARCH ?= $(SRCARCH)
-export LDARCH VDSO
+export LDARCH
 export PROTOUFIX DEFINES
 
 #
@@ -122,9 +127,10 @@ ifeq ($(GMON),1)
 export GMON GMONLDOPT
 endif
 
+AFLAGS			+= -D__ASSEMBLY__
 CFLAGS			+= $(USERCFLAGS) $(WARNINGS) $(DEFINES) -iquote include/
 HOSTCFLAGS		+= $(WARNINGS) $(DEFINES) -iquote include/
-export CFLAGS USERCLFAGS HOSTCFLAGS
+export AFLAGS CFLAGS USERCLFAGS HOSTCFLAGS
 
 # Default target
 all: criu lib crit
@@ -187,6 +193,7 @@ include Makefile.config
 else
 # To clean all files, enable make/build options here
 export CONFIG_COMPAT := y
+export CONFIG_GNUTLS := y
 endif
 
 #
@@ -373,7 +380,11 @@ help:
 .PHONY: help
 
 lint:
+	flake8 --version
 	flake8 --config=scripts/flake8.cfg test/zdtm.py
+	flake8 --config=scripts/flake8.cfg test/inhfd/*.py
+	flake8 --config=scripts/flake8.cfg test/others/rpc/config_file.py
+	flake8 --config=scripts/flake8.cfg lib/py/images/pb2dict.py
 
 include Makefile.install
 

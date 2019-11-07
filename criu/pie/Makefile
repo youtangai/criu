@@ -1,34 +1,37 @@
+# Recipes to compile PIEs: parastie and restorer
+# Compel will deal with converting the result binaries
+# to a C array to be used in CRIU.
+
 target		:= parasite restorer
 
 CFLAGS		:= $(filter-out -pg $(CFLAGS-GCOV) $(CFLAGS-ASAN),$(CFLAGS))
-ccflags-y	+= $(COMPEL_UAPI_INCLUDES)
-ccflags-y	+= $(CFLAGS_PIE)
-ccflags-y	+= -DCR_NOGLIBC
+CFLAGS		+= $(CFLAGS_PIE)
 ccflags-y	+= -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
 ccflags-y	+= -Wp,-U_FORTIFY_SOURCE -Wp,-D_FORTIFY_SOURCE=0
 
 ifneq ($(filter-out clean mrproper,$(MAKECMDGOALS)),)
-	CFLAGS		+= $(shell $(COMPEL_BIN) cflags)
-	LDFLAGS		+= $(shell $(COMPEL_BIN) ldflags)
-	compel_plugins	:= $(shell $(COMPEL_BIN) plugins)
+        LDFLAGS		+= $(shell $(COMPEL_BIN) ldflags)
+        compel_plugins	:= $(shell $(COMPEL_BIN) plugins)
 endif
-
-ifeq ($(SRCARCH),arm)
-	ccflags-y	+= -marm
-endif
-
-asflags-y	+= -D__ASSEMBLY__
 
 LDS		:= compel/arch/$(SRCARCH)/scripts/compel-pack.lds.S
 
+restorer-obj-y	+= parasite-vdso.o ./$(ARCH_DIR)/vdso-pie.o
 restorer-obj-y	+= ./$(ARCH_DIR)/restorer.o
 
 ifeq ($(ARCH),x86)
         ifeq ($(CONFIG_COMPAT),y)
-                restorer-obj-y	+= ./$(ARCH_DIR)/call32.o
                 restorer-obj-y	+= ./$(ARCH_DIR)/restorer_unmap.o
                 restorer-obj-y	+= ./$(ARCH_DIR)/sigaction_compat_pie.o
         endif
+endif
+
+ifeq ($(SRCARCH),aarch64)
+        restorer-obj-y	+= ./$(ARCH_DIR)/intraprocedure.o
+endif
+
+ifeq ($(SRCARCH),ppc64)
+        restorer-obj-y	+= ./$(ARCH_DIR)/vdso-trampoline.o
 endif
 
 define gen-pie-rules

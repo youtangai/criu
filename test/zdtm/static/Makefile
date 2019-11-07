@@ -30,6 +30,7 @@ TST_NOFILE	:=				\
 		socket_listen6			\
 		socket_listen4v6		\
 		socket_udp			\
+		socket_udp-broadcast		\
 		socket_udp-corked		\
 		socket6_udp			\
 		socket_udp_shutdown		\
@@ -66,6 +67,7 @@ TST_NOFILE	:=				\
 		sockets02			\
 		sockets_spair			\
 		socket_queues			\
+		socket-raw			\
 		socket-tcp			\
 		socket-tcp-reseted		\
 		socket-tcp6			\
@@ -103,6 +105,7 @@ TST_NOFILE	:=				\
 		socket-tcp-unconn		\
 		socket-tcp6-unconn		\
 		socket-tcp-syn-sent		\
+		socket-tcp-skip-in-flight       \
 		sock_opts00			\
 		sock_opts01			\
 		sk-unix-unconn			\
@@ -120,6 +123,7 @@ TST_NOFILE	:=				\
 		file_fown			\
 		proc-self			\
 		eventfs00			\
+		epoll				\
 		signalfd00			\
 		inotify_irmap			\
 		fanotify00			\
@@ -204,6 +208,15 @@ TST_NOFILE	:=				\
 		netns_sub			\
 		netns_sub_veth			\
 		unlink_multiple_largefiles	\
+		config_inotify_irmap		\
+		thp_disable			\
+		pid_file			\
+		selinux00			\
+		selinux01			\
+		selinux02			\
+		child_subreaper			\
+		child_subreaper_existing_child	\
+		child_subreaper_and_reparent	\
 #		jobctl00			\
 
 ifneq ($(SRCARCH),arm)
@@ -298,6 +311,7 @@ TST_DIR		=				\
 		inotify00			\
 		inotify01			\
 		inotify02			\
+		inotify04			\
 		cgroup00			\
 		rmdir_open			\
 		cgroup01			\
@@ -334,6 +348,12 @@ TST_DIR		=				\
 		del_standalone_un		\
 		sk-unix-mntns			\
 		sk-unix01			\
+		unsupported_children_collision  \
+		shared_slave_mount_children	\
+		non_uniform_share_propagation	\
+		private_bind_propagation	\
+		ghost_on_rofs			\
+		overmounted_file		\
 
 TST_DIR_FILE	=				\
 		chroot				\
@@ -479,6 +499,7 @@ socket_listen4v6:	CFLAGS += -D ZDTM_IPV4V6
 socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV6
 socket-tcp6-closed:	CFLAGS += -D ZDTM_IPV4V6
 socket-tcp-closed-last-ack:	CFLAGS += -D ZDTM_TCP_LAST_ACK
+socket-tcp-skip-in-flight:	CFLAGS += -D ZDTM_IPV4V6
 tun_ns:			CFLAGS += -DTUN_NS
 mnt_ext_manual:		CFLAGS += -D ZDTM_EXTMAP_MANUAL
 sigpending:		LDLIBS += -lrt
@@ -491,6 +512,7 @@ mntns_shared_bind02:	CFLAGS += -DSHARED_BIND02
 mntns_root_bind02:	CFLAGS += -DROOT_BIND02
 maps02: get_smaps_bits.o
 mlock_setuid: get_smaps_bits.o
+thp_disable: get_smaps_bits.o
 inotify01:		CFLAGS += -DINOTIFY01
 unlink_fstat01+:	CFLAGS += -DUNLINK_OVER
 unlink_fstat04:		CFLAGS += -DUNLINK_FSTAT04
@@ -498,6 +520,7 @@ unlink_fstat041:		CFLAGS += -DUNLINK_FSTAT041 -DUNLINK_FSTAT04
 ghost_holes01:		CFLAGS += -DTAIL_HOLE
 ghost_holes02:		CFLAGS += -DHEAD_HOLE
 sk-freebind-false:	CFLAGS += -DZDTM_FREEBIND_FALSE
+selinux02:		CFLAGS += -DUSING_SOCKCREATE
 stopped01:		CFLAGS += -DZDTM_STOPPED_KILL
 stopped02:		CFLAGS += -DZDTM_STOPPED_TKILL
 stopped12:		CFLAGS += -DZDTM_STOPPED_KILL -DZDTM_STOPPED_TKILL

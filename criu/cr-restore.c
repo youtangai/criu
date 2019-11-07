@@ -4,16 +4,13 @@
 #include <limits.h>
 #include <unistd.h>
 #include <errno.h>
-#include <dirent.h>
 #include <string.h>
 
 #include <fcntl.h>
-#include <grp.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <sys/file.h>
 #include <sys/shm.h>
@@ -21,7 +18,6 @@
 #include <sys/prctl.h>
 #include <sched.h>
 
-#include <sys/sendfile.h>
 
 #include "types.h"
 #include <compel/ptrace.h>
@@ -39,7 +35,6 @@
 #include "sk-packet.h"
 #include "common/lock.h"
 #include "files.h"
-#include "files-reg.h"
 #include "pipes.h"
 #include "fifo.h"
 #include "sk-inet.h"
@@ -68,7 +63,6 @@
 #include "plugin.h"
 #include "cgroup.h"
 #include "timerfd.h"
-#include "file-lock.h"
 #include "action-scripts.h"
 #include "shmem.h"
 #include <compel/compel.h>
@@ -143,7 +137,6 @@ static inline int stage_participants(int next_stage)
 	case CR_STATE_RESTORE:
 		return task_entries->nr_threads + task_entries->nr_helpers;
 	case CR_STATE_RESTORE_SIGCHLD:
-		return task_entries->nr_threads;
 	case CR_STATE_RESTORE_CREDS:
 		return task_entries->nr_threads;
 	}
@@ -397,10 +390,10 @@ static int populate_root_fd_off(void)
 	struct ns_id *mntns = NULL;
 	int ret;
 
-        if (root_ns_mask & CLONE_NEWNS) {
-                mntns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
-                BUG_ON(!mntns);
-        }
+	if (root_ns_mask & CLONE_NEWNS) {
+		mntns = lookup_ns_by_id(root_item->ids->mnt_ns_id, &mnt_ns_desc);
+		BUG_ON(!mntns);
+	}
 
 	ret = mntns_get_root_fd(mntns);
 	if (ret < 0)
@@ -733,6 +726,40 @@ static int collect_zombie_pids(struct task_restore_args *ta)
 	return collect_child_pids(TASK_DEAD, &ta->zombies_n);
 }
 
+static int collect_inotify_fds(struct task_restore_args *ta)
+{
+	struct list_head *list = &rsti(current)->fds;
+	struct fdt *fdt = rsti(current)->fdt;
+	struct fdinfo_list_entry *fle;
+
+	/* Check we are an fdt-restorer */
+	if (fdt && fdt->pid != vpid(current))
+		return 0;
+
+	ta->inotify_fds = (int *)rst_mem_align_cpos(RM_PRIVATE);
+
+	list_for_each_entry(fle, list, ps_list) {
+		struct file_desc *d = fle->desc;
+		int *inotify_fd;
+
+		if (d->ops->type != FD_TYPES__INOTIFY)
+			continue;
+
+		if (fle != file_master(d))
+			continue;
+
+		inotify_fd = rst_mem_alloc(sizeof(*inotify_fd), RM_PRIVATE);
+		if (!inotify_fd)
+			return -1;
+
+		ta->inotify_fds_n++;
+		*inotify_fd = fle->fe->fd;
+
+		pr_debug("Collect inotify fd %d to cleanup later\n", *inotify_fd);
+	}
+	return 0;
+}
+
 static int open_core(int pid, CoreEntry **pcore)
 {
 	int ret;
@@ -813,9 +840,12 @@ static int prepare_oom_score_adj(int value)
 	return ret;
 }
 
-static int prepare_proc_misc(pid_t pid, TaskCoreEntry *tc)
+static int prepare_proc_misc(pid_t pid, TaskCoreEntry *tc, struct task_restore_args *args)
 {
 	int ret;
+
+	if (tc->has_child_subreaper)
+		args->child_subreaper = tc->child_subreaper;
 
 	/* loginuid value is critical to restore */
 	if (kdat.luid == LUID_FULL && tc->has_loginuid &&
@@ -845,7 +875,7 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 
 	args_len = round_up(sizeof(*ta) + sizeof(struct thread_restore_args) *
 			current->nr_threads, page_size());
-	ta = mmap(NULL, args_len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, 0, 0);
+	ta = mmap(NULL, args_len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
 	if (!ta)
 		return -1;
 
@@ -884,10 +914,10 @@ static int restore_one_alive_task(int pid, CoreEntry *core)
 	if (collect_zombie_pids(ta) < 0)
 		return -1;
 
-	if (inherit_fd_fini() < 0)
+	if (collect_inotify_fds(ta) < 0)
 		return -1;
 
-	if (prepare_proc_misc(pid, core->tc))
+	if (prepare_proc_misc(pid, core->tc, ta))
 		return -1;
 
 	/*
@@ -1017,9 +1047,6 @@ static int restore_one_zombie(CoreEntry *core)
 	pr_info("Restoring zombie with %d code\n", exit_code);
 
 	if (prepare_fds(current))
-		return -1;
-
-	if (inherit_fd_fini() < 0)
 		return -1;
 
 	if (lazy_pages_setup_zombie(vpid(current)))
@@ -1243,7 +1270,6 @@ static int restore_one_task(int pid, CoreEntry *core)
 struct cr_clone_arg {
 	struct pstree_item *item;
 	unsigned long clone_flags;
-	int fd;
 
 	CoreEntry *core;
 };
@@ -1286,7 +1312,11 @@ static void maybe_clone_parent(struct pstree_item *item,
 
 static bool needs_prep_creds(struct pstree_item *item)
 {
-	return (!item->parent && (root_ns_mask & CLONE_NEWUSER));
+	/*
+	 * Before the 4.13 kernel, it was impossible to set
+	 * an exe_file if uid or gid isn't zero.
+	 */
+	return (!item->parent && ((root_ns_mask & CLONE_NEWUSER) || getuid()));
 }
 
 static inline int fork_with_pid(struct pstree_item *item)
@@ -1342,29 +1372,27 @@ static inline int fork_with_pid(struct pstree_item *item)
 	if (!(ca.clone_flags & CLONE_NEWPID)) {
 		char buf[32];
 		int len;
+		int fd;
 
-		ca.fd = open_proc_rw(PROC_GEN, LAST_PID_PATH);
-		if (ca.fd < 0)
+		fd = open_proc_rw(PROC_GEN, LAST_PID_PATH);
+		if (fd < 0)
 			goto err;
 
-		if (flock(ca.fd, LOCK_EX)) {
-			close(ca.fd);
-			pr_perror("%d: Can't lock %s", pid, LAST_PID_PATH);
-			goto err;
-		}
+		lock_last_pid();
 
 		len = snprintf(buf, sizeof(buf), "%d", pid - 1);
-		if (write(ca.fd, buf, len) != len) {
+		if (write(fd, buf, len) != len) {
 			pr_perror("%d: Write %s to %s", pid, buf, LAST_PID_PATH);
+			close(fd);
 			goto err_unlock;
 		}
+		close(fd);
 	} else {
-		ca.fd = -1;
 		BUG_ON(pid != INIT_PID);
 	}
 
 	/*
-	 * Some kernel modules, such as netwrok packet generator
+	 * Some kernel modules, such as network packet generator
 	 * run kernel thread upon net-namespace creattion taking
 	 * the @pid we've been requeting via LAST_PID_PATH interface
 	 * so that we can't restore a take with pid needed.
@@ -1391,12 +1419,8 @@ static inline int fork_with_pid(struct pstree_item *item)
 	}
 
 err_unlock:
-	if (ca.fd >= 0) {
-		if (flock(ca.fd, LOCK_UN))
-			pr_perror("%d: Can't unlock %s", pid, LAST_PID_PATH);
-
-		close(ca.fd);
-	}
+	if (!(ca.clone_flags & CLONE_NEWPID))
+		unlock_last_pid();
 err:
 	if (ca.core)
 		core_entry__free_unpacked(ca.core, NULL);
@@ -1503,7 +1527,7 @@ static void restore_sid(void)
 			exit(1);
 		}
 	} else {
-		sid = getsid(getpid());
+		sid = getsid(0);
 		if (sid != current->sid) {
 			/* Skip the root task if it's not init */
 			if (current == root_item && vpid(root_item) != INIT_PID)
@@ -1608,7 +1632,7 @@ static int create_children_and_session(void)
 		if (!restore_before_setsid(child))
 			continue;
 
-		BUG_ON(child->born_sid != -1 && getsid(getpid()) != child->born_sid);
+		BUG_ON(child->born_sid != -1 && getsid(0) != child->born_sid);
 
 		ret = fork_with_pid(child);
 		if (ret < 0)
@@ -1660,9 +1684,6 @@ static int restore_task_with_children(void *_arg)
 				current->pid->real, vpid(current));
 	}
 
-	if ( !(ca->clone_flags & CLONE_FILES))
-		close_safe(&ca->fd);
-
 	pid = getpid();
 	if (vpid(current) != pid) {
 		pr_err("Pid %d do not match expected %d\n", pid, vpid(current));
@@ -1679,7 +1700,11 @@ static int restore_task_with_children(void *_arg)
 		 * ACT_SETUP_NS scripts, so the root netns has to be created here
 		 */
 		if (root_ns_mask & CLONE_NEWNET) {
-			ret = unshare(CLONE_NEWNET);
+			struct ns_id *ns = net_get_root_ns();
+			if (ns->ext_key)
+				ret = net_set_ext(ns);
+			else
+				ret = unshare(CLONE_NEWNET);
 			if (ret) {
 				pr_perror("Can't unshare net-namespace");
 				goto err;
@@ -2053,7 +2078,6 @@ static int restore_root_task(struct pstree_item *init)
 	}
 
 	ret = install_service_fd(CR_PROC_FD_OFF, fd);
-	close(fd);
 	if (ret < 0)
 		return -1;
 
@@ -2143,7 +2167,7 @@ static int restore_root_task(struct pstree_item *init)
 			goto out_kill;
 	}
 
-	if (opts.empty_ns & CLONE_NEWNET) {
+	if (root_ns_mask & opts.empty_ns & CLONE_NEWNET) {
 		/*
 		 * Local TCP connections were locked by network_lock_internal()
 		 * on dump and normally should have been C/R-ed by respectively
@@ -2286,7 +2310,7 @@ skip_ns_bouncing:
 out_kill:
 	/*
 	 * The processes can be killed only when all of them have been created,
-	 * otherwise an external proccesses can be killed.
+	 * otherwise an external processes can be killed.
 	 */
 	if (root_ns_mask & CLONE_NEWPID) {
 		int status;
@@ -2296,7 +2320,7 @@ out_kill:
 			kill(root_item->pid->real, SIGKILL);
 
 		if (waitpid(root_item->pid->real, &status, 0) < 0)
-			pr_warn("Unable to wait %d: %s",
+			pr_warn("Unable to wait %d: %s\n",
 				root_item->pid->real, strerror(errno));
 	} else {
 		struct pstree_item *pi;
@@ -2329,6 +2353,7 @@ int prepare_task_entries(void)
 	task_entries->nr_helpers = 0;
 	futex_set(&task_entries->start, CR_STATE_FAIL);
 	mutex_init(&task_entries->userns_sync_lock);
+	mutex_init(&task_entries->last_pid_mutex);
 
 	return 0;
 }
@@ -2350,6 +2375,9 @@ int cr_restore_tasks(void)
 {
 	int ret = -1;
 
+	if (init_service_fd())
+		return 1;
+
 	if (cr_plugin_init(CR_PLUGIN_STAGE__RESTORE))
 		return -1;
 
@@ -2370,7 +2398,10 @@ int cr_restore_tasks(void)
 	if (vdso_init_restore())
 		goto err;
 
-	if (opts.cpu_cap & (CPU_CAP_INS | CPU_CAP_CPU)) {
+	if (tty_init_restore())
+		goto err;
+
+	if (opts.cpu_cap & CPU_CAP_IMAGE) {
 		if (cpu_validate_cpuinfo())
 			goto err;
 	}
@@ -2382,6 +2413,9 @@ int cr_restore_tasks(void)
 		goto err;
 
 	if (fdstore_init())
+		goto err;
+
+	if (inherit_fd_move_to_fdstore())
 		goto err;
 
 	if (crtools_prepare_shared() < 0)
@@ -2741,7 +2775,7 @@ static int prepare_restorer_blob(void)
 	restorer_len = pie_size(restorer);
 	restorer = mmap(NULL, restorer_len,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_PRIVATE | MAP_ANON, 0, 0);
+			MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
 	if (restorer == MAP_FAILED) {
 		pr_perror("Can't map restorer code");
 		return -1;
@@ -3008,6 +3042,8 @@ static void rst_reloc_creds(struct thread_restore_args *thread_args,
 
 	if (args->lsm_profile)
 		args->lsm_profile = rst_mem_remap_ptr(args->mem_lsm_profile_pos, RM_PRIVATE);
+	if (args->lsm_sockcreate)
+		args->lsm_sockcreate = rst_mem_remap_ptr(args->mem_lsm_sockcreate_pos, RM_PRIVATE);
 	if (args->groups)
 		args->groups = rst_mem_remap_ptr(args->mem_groups_pos, RM_PRIVATE);
 
@@ -3071,6 +3107,40 @@ rst_prep_creds_args(CredsEntry *ce, unsigned long *prev_pos)
 	} else {
 		args->lsm_profile = NULL;
 		args->mem_lsm_profile_pos = 0;
+	}
+
+	if (ce->lsm_sockcreate) {
+		char *rendered = NULL;
+		char *profile;
+
+		profile = ce->lsm_sockcreate;
+
+		if (validate_lsm(profile) < 0)
+			return ERR_PTR(-EINVAL);
+
+		if (profile && render_lsm_profile(profile, &rendered)) {
+			return ERR_PTR(-EINVAL);
+		}
+		if (rendered) {
+			size_t lsm_sockcreate_len;
+			char *lsm_sockcreate;
+
+			args->mem_lsm_sockcreate_pos = rst_mem_align_cpos(RM_PRIVATE);
+			lsm_sockcreate_len = strlen(rendered);
+			lsm_sockcreate = rst_mem_alloc(lsm_sockcreate_len + 1, RM_PRIVATE);
+			if (!lsm_sockcreate) {
+				xfree(rendered);
+				return ERR_PTR(-ENOMEM);
+			}
+
+			args = rst_mem_remap_ptr(this_pos, RM_PRIVATE);
+			args->lsm_sockcreate = lsm_sockcreate;
+			strncpy(args->lsm_sockcreate, rendered, lsm_sockcreate_len);
+			xfree(rendered);
+		}
+	} else {
+		args->lsm_sockcreate = NULL;
+		args->mem_lsm_sockcreate_pos = 0;
 	}
 
 	/*
@@ -3203,10 +3273,8 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	struct thread_restore_args *thread_args;
 	struct restore_mem_zone *mz;
 
-#ifdef CONFIG_VDSO
 	struct vdso_maps vdso_maps_rt;
 	unsigned long vdso_rt_size = 0;
-#endif
 
 	struct vm_area_list self_vmas;
 	struct vm_area_list *vmas = &rsti(current)->vmas;
@@ -3233,7 +3301,11 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 	if (current->parent == NULL) {
 		/* Wait when all tasks restored all files */
-		restore_wait_other_tasks();
+		if (restore_wait_other_tasks())
+			goto err_nv;
+		if (root_ns_mask & CLONE_NEWNS &&
+		    remount_readonly_mounts())
+			goto err_nv;
 	}
 
 	/*
@@ -3253,7 +3325,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	pr_info("%d threads require %ldK of memory\n",
 			current->nr_threads, KBYTES(task_args->bootstrap_len));
 
-#ifdef CONFIG_VDSO
 	if (core_is_compat(core))
 		vdso_maps_rt = vdso_maps_compat;
 	else
@@ -3265,7 +3336,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	if (vdso_rt_size && vdso_maps_rt.sym.vvar_size)
 		vdso_rt_size += ALIGN(vdso_maps_rt.sym.vvar_size, PAGE_SIZE);
 	task_args->bootstrap_len += vdso_rt_size;
-#endif
 
 	/*
 	 * Restorer is a blob (code + args) that will get mapped in some
@@ -3306,7 +3376,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 	/* VMA we need for stacks and sigframes for threads */
 	if (mmap(mem, memzone_size, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANON | MAP_FIXED, 0, 0) != mem) {
+			MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, 0, 0) != mem) {
 		pr_err("Can't mmap section for restore code\n");
 		goto err;
 	}
@@ -3383,6 +3453,7 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	RST_MEM_FIXUP_PPTR(task_args->helpers);
 	RST_MEM_FIXUP_PPTR(task_args->zombies);
 	RST_MEM_FIXUP_PPTR(task_args->vma_ios);
+	RST_MEM_FIXUP_PPTR(task_args->inotify_fds);
 
 	task_args->compatible_mode = core_is_compat(core);
 	/*
@@ -3466,6 +3537,12 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		if (construct_sigframe(sigframe, sigframe, blkset, tcore))
 			goto err;
 
+		if (tcore->thread_core->comm)
+			strncpy(thread_args[i].comm, tcore->thread_core->comm, TASK_COMM_LEN - 1);
+		else
+			strncpy(thread_args[i].comm, core->tc->comm, TASK_COMM_LEN - 1);
+		thread_args[i].comm[TASK_COMM_LEN - 1] = 0;
+
 		if (thread_args[i].pid != pid)
 			core_entry__free_unpacked(tcore, NULL);
 
@@ -3474,7 +3551,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 
 	}
 
-#ifdef CONFIG_VDSO
 	/*
 	 * Restorer needs own copy of vdso parameters. Runtime
 	 * vdso must be kept non intersecting with anything else,
@@ -3486,7 +3562,6 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	task_args->vdso_maps_rt = vdso_maps_rt;
 	task_args->vdso_rt_size = vdso_rt_size;
 	task_args->can_map_vdso = kdat.can_map_vdso;
-#endif
 
 	new_sp = restorer_stack(task_args->t->mz);
 
@@ -3499,6 +3574,15 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 	 */
 	task_args->nr_threads		= current->nr_threads;
 	task_args->thread_args		= thread_args;
+
+	task_args->auto_dedup		= opts.auto_dedup;
+
+	/*
+	 * In the restorer we need to know if it is SELinux or not. For SELinux
+	 * we must change the process context before creating threads. For
+	 * Apparmor we can change each thread after they have been created.
+	 */
+	task_args->lsm_type		= kdat.lsm;
 
 	/*
 	 * Make root and cwd restore _that_ late not to break any

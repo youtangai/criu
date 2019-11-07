@@ -186,7 +186,8 @@ int parse_cg_info(void)
 /* Check that co-mounted controllers from /proc/cgroups (e.g. cpu and cpuacct)
  * are contained in a comma separated string (e.g. from /proc/self/cgroup or
  * mount options). */
-static bool cgroup_contains(char **controllers, unsigned int n_controllers, char *name)
+static bool cgroup_contains(char **controllers,
+			unsigned int n_controllers, char *name, u64 *mask)
 {
 	unsigned int i;
 	bool all_match = true;
@@ -201,6 +202,8 @@ static bool cgroup_contains(char **controllers, unsigned int n_controllers, char
 				case '\0':
 				case ',':
 					found = true;
+					if (mask)
+						*mask &= ~(1ULL << i);
 					break;
 				}
 			}
@@ -557,7 +560,7 @@ static int collect_cgroups(struct list_head *ctls)
 		 * controller from parse_cgroups(), so find that controller if
 		 * it exists. */
 		list_for_each_entry(cg, &cgroups, l) {
-			if (cgroup_contains(cg->controllers, cg->n_controllers, cc->name)) {
+			if (cgroup_contains(cg->controllers, cg->n_controllers, cc->name, NULL)) {
 				current_controller = cg;
 				break;
 			}
@@ -815,6 +818,7 @@ static int dump_controllers(CgroupEntry *cg)
 		if (ce->n_dirs > 0)
 			if (dump_cg_dirs(&cur->heads, cur->n_heads, &ce->dirs, 0) < 0) {
 				xfree(cg->controllers);
+				cg->controllers = NULL;
 				return -1;
 			}
 		cg->controllers[i++] = ce++;
@@ -1021,7 +1025,7 @@ static int prepare_cgns(CgSetEntry *se)
 
 		for (j = 0; j < n_controllers; j++) {
 			CgControllerEntry *cur = controllers[j];
-			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name)) {
+			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name, NULL)) {
 				ctrl = cur;
 				break;
 			}
@@ -1093,7 +1097,7 @@ static int move_in_cgroup(CgSetEntry *se, bool setup_cgns)
 
 		for (j = 0; j < n_controllers; j++) {
 			CgControllerEntry *cur = controllers[j];
-			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name)) {
+			if (cgroup_contains(cur->cnames, cur->n_cnames, ce->name, NULL)) {
 				ctrl = cur;
 				break;
 			}
@@ -1471,7 +1475,7 @@ static int restore_devices_list(char *paux, size_t off, CgroupPropEntry *pr)
 	ret = restore_cgroup_prop(&dev_deny, paux, off, false, false);
 
 	/*
-	 * An emptry string here means nothing is allowed,
+	 * An empty string here means nothing is allowed,
 	 * and the kernel disallows writing an "" to devices.allow,
 	 * so let's just keep going.
 	 */
@@ -1671,7 +1675,6 @@ static int prepare_cgroup_sfd(CgroupEntry *ce)
 	}
 
 	ret = install_service_fd(CGROUP_YARD, i);
-	close(i);
 	if (ret < 0)
 		goto err;
 
@@ -1759,7 +1762,7 @@ static int rewrite_cgsets(CgroupEntry *cge, char **controllers, int n_controller
 			 * and its path with stripping leading
 			 * "/" is matching to be renamed.
 			 */
-			if (!(cgroup_contains(controllers, n_controllers, cg->name) &&
+			if (!(cgroup_contains(controllers, n_controllers, cg->name, NULL) &&
 					strstartswith(cg->path + 1, dir)))
 				continue;
 
@@ -1814,19 +1817,31 @@ static int rewrite_cgroup_roots(CgroupEntry *cge)
 {
 	int i, j;
 	struct cg_root_opt *o;
-	char *newroot = NULL;
 
 	for (i = 0; i < cge->n_controllers; i++) {
 		CgControllerEntry *ctrl = cge->controllers[i];
-		newroot = opts.new_global_cg_root;
+		u64 ctrl_mask = (1ULL << ctrl->n_cnames) - 1;
+		char *newroot = NULL;
 
 		list_for_each_entry(o, &opts.new_cgroup_roots, node) {
-			if (cgroup_contains(ctrl->cnames, ctrl->n_cnames, o->controller)) {
-				newroot = o->newroot;
-				break;
-			}
+			unsigned old_mask = ctrl_mask;
 
+			cgroup_contains(ctrl->cnames, ctrl->n_cnames,
+					o->controller, &ctrl_mask);
+			if (old_mask != ctrl_mask) {
+				if (newroot && strcmp(newroot, o->newroot)) {
+					pr_err("CG paths mismatch: %s %s\n",
+							newroot, o->newroot);
+					return -1;
+				}
+				newroot = o->newroot;
+			}
+			if (!ctrl_mask)
+				break;
 		}
+
+		if (!newroot)
+			newroot = opts.new_global_cg_root;
 
 		if (newroot) {
 			for (j = 0; j < ctrl->n_dirs; j++) {
@@ -1883,7 +1898,7 @@ int new_cg_root_add(char *controller, char *newroot)
 	struct cg_root_opt *o;
 
 	if (!controller) {
-		opts.new_global_cg_root = newroot;
+		SET_CHAR_OPTS(new_global_cg_root, newroot);
 		return 0;
 	}
 

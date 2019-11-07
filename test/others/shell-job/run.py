@@ -1,20 +1,22 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 import os, pty, sys, subprocess
-import termios, fcntl, time, signal
+import termios, fcntl, time
 
 cr_bin = "../../../criu/criu"
 
 os.chdir(os.getcwd())
 
+
 def create_pty():
-        (fd1, fd2) = pty.openpty()
-        return (os.fdopen(fd1, "w+"), os.fdopen(fd2, "w+"))
+    (fd1, fd2) = pty.openpty()
+    return (os.fdopen(fd1, "wb"), os.fdopen(fd2, "wb"))
+
 
 if not os.access("work", os.X_OK):
-    os.mkdir("work", 0755)
+    os.mkdir("work", 0o755)
 
 open("running", "w").close()
-m,s = create_pty()
+m, s = create_pty()
 p = os.pipe()
 pr = os.fdopen(p[0], "r")
 pw = os.fdopen(p[1], "w")
@@ -46,14 +48,15 @@ if ret != 0:
 os.wait()
 
 os.unlink("running")
-m,s = create_pty()
+m, s = create_pty()
 cpid = os.fork()
 if cpid == 0:
     os.setsid()
     fcntl.ioctl(m.fileno(), termios.TIOCSCTTY, 1)
     cmd = [cr_bin, "restore", "-j", "-D", "work", "-v"]
     print("Run: %s" % " ".join(cmd))
-    ret = subprocess.Popen([cr_bin, "restore", "-j", "-D", "work", "-v"]).wait()
+    ret = subprocess.Popen([cr_bin, "restore", "-j", "-D", "work",
+                            "-v"]).wait()
     if ret != 0:
         sys.exit(1)
     sys.exit(0)
@@ -62,4 +65,3 @@ pid, status = os.wait()
 if status != 0:
     print("A child process exited with %d" % status)
     sys.exit(1)
-

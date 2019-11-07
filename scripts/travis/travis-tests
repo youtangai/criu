@@ -1,10 +1,10 @@
 #!/bin/sh
 set -x -e
 
-TRAVIS_PKGS="protobuf-c-compiler libprotobuf-c0-dev libaio-dev
-		libprotobuf-dev protobuf-compiler libcap-dev
-		libnl-3-dev gcc-multilib gdb bash python-protobuf
-		libnet-dev util-linux asciidoc xmlto libnl-route-3-dev"
+TRAVIS_PKGS="protobuf-c-compiler libprotobuf-c-dev libaio-dev
+		libgnutls28-dev libgnutls30 libprotobuf-dev protobuf-compiler
+		libcap-dev libnl-3-dev gcc-multilib gdb bash python-protobuf
+		libnet-dev util-linux asciidoctor libnl-route-3-dev"
 
 travis_prep () {
 	[ -n "$SKIP_TRAVIS_PREP" ] && return
@@ -61,6 +61,30 @@ time make CC="$CC" -j4
 
 [ -n "$SKIP_TRAVIS_TEST" ] && return
 
+if [ "${COMPAT_TEST}x" = "yx" ] ; then
+	# Dirty hack to keep both ia32 & x86_64 shared libs on a machine:
+	# headers are probably not compatible, so apt-get doesn't allow
+	# installing both versions, while we need one for CRIU and one
+	# for 32-bit tests. A better way would involve launching docker..
+	# But it would require making zdtm.py aware of docker and launching
+	# tests inside the CT.
+	INCOMPATIBLE_LIBS="libaio-dev libcap-dev libnl-3-dev libnl-route-3-dev"
+	IA32_PKGS=""
+	REFUGE=64-refuge
+
+	mkdir "$REFUGE"
+	for i in $INCOMPATIBLE_LIBS ; do
+		for j in $(dpkg --listfiles $i | grep '\.so$') ; do
+			cp "$j" "$REFUGE/"
+		done
+		IA32_PKGS="$IA32_PKGS $i:i386"
+	done
+	apt-get remove $INCOMPATIBLE_LIBS
+	apt-get install --no-install-recommends $IA32_PKGS
+	mkdir -p /usr/lib/x86_64-linux-gnu/
+	mv "$REFUGE"/* /usr/lib/x86_64-linux-gnu/
+fi
+
 time make CC="$CC" -j4 -C test/zdtm
 
 [ -f "$CCACHE_LOGFILE" ] && cat $CCACHE_LOGFILE
@@ -76,7 +100,7 @@ umask 0000
 export SKIP_PREP=1
 # The 3.19 kernel (from Ubuntu 14.04) has a bug. When /proc/PID/pagemap
 # is read for a few VMAs in one read call, incorrect data is returned.
-# See https://github.com/xemul/criu/issues/207
+# See https://github.com/checkpoint-restore/criu/issues/207
 # Kernel 4.4 (from Ubuntu 14.04.5 update) fixes this.
 uname -r | grep -q ^3\.19 && export CRIU_PMC_OFF=1
 
@@ -88,12 +112,12 @@ chmod 0777 test/zdtm/transition
 
 KERN_MAJ=`uname -r | cut -d. -f1`
 KERN_MIN=`uname -r | cut -d. -f2`
-if [ $KERN_MAJ -ge "4" ] && [ $KERN_MIN -ge "11" ]; then
+if [ $KERN_MAJ -ge "4" ] && [ $KERN_MIN -ge "18" ]; then
 	LAZY_EXCLUDE="-x cmdlinenv00 -x maps007"
 else
 	LAZY_EXCLUDE="-x maps007 -x fork -x fork2 -x uffd-events -x cgroupns
 		      -x socket_listen -x socket_listen6 -x cmdlinenv00
-		      -x socket_close_data01 -x file_read -x lazy-thp"
+		      -x socket_close_data01 -x file_read -x lazy-thp -x futex"
 fi
 LAZY_EXCLUDE="$LAZY_EXCLUDE -x maps04"
 
@@ -101,6 +125,7 @@ LAZY_TESTS=.*\(maps0\|uffd-events\|lazy-thp\|futex\|fork\).*
 
 ./test/zdtm.py run -p 2 -T $LAZY_TESTS --lazy-pages $LAZY_EXCLUDE $ZDTM_OPTS
 ./test/zdtm.py run -p 2 -T $LAZY_TESTS --remote-lazy-pages $LAZY_EXCLUDE $ZDTM_OPTS
+./test/zdtm.py run -p 2 -T $LAZY_TESTS --remote-lazy-pages --tls $LAZY_EXCLUDE $ZDTM_OPTS
 
 bash ./test/jenkins/criu-fault.sh
 bash ./test/jenkins/criu-fcg.sh
@@ -112,6 +137,7 @@ fi
 #make -C test/others/exec/ run
 make -C test/others/make/ run CC="$CC"
 make -C test/others/shell-job/ run
+make -C test/others/rpc/ run
 
 ./test/zdtm.py run -t zdtm/static/env00 --sibling
 
@@ -137,7 +163,9 @@ ip net add test
 
 make -C test/others/shell-job
 
-pip install flake8
+if ! [ -x "$(command -v flake8)" ]; then
+	pip install flake8
+fi
 make lint
 
 # Check that help output fits into 80 columns

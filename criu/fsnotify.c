@@ -3,16 +3,13 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
 #include <signal.h>
 #include <string.h>
 #include <utime.h>
-#include <dirent.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/inotify.h>
-#include <sys/vfs.h>
 #include <linux/magic.h>
 #include <sys/wait.h>
 #include <poll.h>
@@ -178,7 +175,7 @@ static char *alloc_openable(unsigned int s_dev, unsigned long i_ino, FhEntry *f_
 			if (st.st_ino == i_ino) {
 				path = xstrdup(buf);
 				if (path == NULL)
-					goto err;
+					return ERR_PTR(-ENOMEM);
 				if (root_ns_mask & CLONE_NEWNS) {
 					f_handle->has_mnt_id = true;
 					f_handle->mnt_id = m->mnt_id;
@@ -230,8 +227,8 @@ out:
 int check_open_handle(unsigned int s_dev, unsigned long i_ino,
 		FhEntry *f_handle)
 {
+	char *path, *irmap_path;
 	int fd = -1;
-	char *path;
 
 	if (fault_injected(FI_CHECK_OPEN_HANDLE)) {
 		fd = -1;
@@ -265,6 +262,8 @@ fault:
 		path = alloc_openable(s_dev, i_ino, f_handle);
 		if (!IS_ERR_OR_NULL(path))
 			goto out;
+		else if (IS_ERR(path) && PTR_ERR(path) == -ENOMEM)
+			goto err;
 
 		if ((mi->fstype->code == FSTYPE__TMPFS) ||
 		    (mi->fstype->code == FSTYPE__DEVTMPFS)) {
@@ -287,11 +286,14 @@ fault:
 	}
 
 	pr_warn("\tHandle 0x%x:0x%lx cannot be opened\n", s_dev, i_ino);
-	path = irmap_lookup(s_dev, i_ino);
-	if (!path) {
+	irmap_path = irmap_lookup(s_dev, i_ino);
+	if (!irmap_path) {
 		pr_err("\tCan't dump that handle\n");
 		return -1;
 	}
+	path = xstrdup(irmap_path);
+	if (!path)
+		goto err;
 out:
 	pr_debug("\tDumping %s as path for handle\n", path);
 	f_handle->path = path;
