@@ -11,7 +11,7 @@ REQ-RPM-PKG-NAMES	+= $(PYTHON)-future
 REQ-RPM-PKG-TEST-NAMES  += libaio-devel
 
 REQ-DEB-PKG-NAMES	+= libprotobuf-dev
-REQ-DEB-PKG-NAMES	+= libprotobuf-c0-dev
+REQ-DEB-PKG-NAMES	+= libprotobuf-c-dev
 REQ-DEB-PKG-NAMES	+= protobuf-c-compiler
 REQ-DEB-PKG-NAMES	+= protobuf-compiler
 REQ-DEB-PKG-NAMES	+= python-protobuf
@@ -32,7 +32,7 @@ REQ-DEB-PKG-NAMES	+= python-future
 REQ-RPM-PKG-TEST-NAMES	+= $(PYTHON)-pyyaml
 endif
 
-export LIBS		+= -lrt -lpthread -lprotobuf-c -ldl -lnl-3 -lsoccr -Lsoccr/ -lnet
+export LIBS		+= -lprotobuf-c -ldl -lnl-3 -lsoccr -Lsoccr/ -lnet
 
 check-packages-failed:
 	$(warning Can not find some of the required libraries)

@@ -89,6 +89,7 @@ __NR_set_robust_list	304		sys_set_robust_list	(struct robust_list_head *head, si
 __NR_get_robust_list	305		sys_get_robust_list	(int pid, struct robust_list_head **head_ptr, size_t *len_ptr)
 __NR_vmsplice		309		sys_vmsplice		(int fd, const struct iovec *iov, unsigned long nr_segs, unsigned int flags)
 __NR_openat		288		sys_openat		(int dfd, const char *filename, int flags, int mode)
+__NR_fallocate		314		sys_fallocate		(int fd, int mode, loff_t offset, loff_t len)
 __NR_timerfd_settime	320		sys_timerfd_settime	(int ufd, int flags, const struct itimerspec *utmr, struct itimerspec *otmr)
 __NR_signalfd4		322		sys_signalfd		(int fd, k_rtsigset_t *mask, size_t sizemask, int flags)
 __NR_rt_tgsigqueueinfo	330		sys_rt_tgsigqueueinfo	(pid_t tgid, pid_t pid, int sig, siginfo_t *info)
@@ -106,3 +107,4 @@ __NR_ipc		117		sys_ipc			(unsigned int call, int first, unsigned long second, un
 __NR_userfaultfd	355		sys_userfaultfd		(int flags)
 __NR_preadv		328		sys_preadv_raw		(int fd, struct iovec *iov, unsigned long nr, unsigned long pos_l, unsigned long pos_h)
 __NR_gettimeofday	78		sys_gettimeofday	(struct timeval *tv, struct timezone *tz)
+__NR_ppoll		302		sys_ppoll		(struct pollfd *fds, unsigned int nfds, const struct timespec *tmo, const sigset_t *sigmask, size_t sigsetsize)

@@ -8,7 +8,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/sendfile.h>
 
 #include "common/list.h"
 #include "imgset.h"
@@ -24,10 +23,13 @@
 #include "protobuf.h"
 #include "images/sk-packet.pb-c.h"
 
+#undef  LOG_PREFIX
+#define LOG_PREFIX "skqueue: "
+
 struct sk_packet {
 	struct list_head	list;
 	SkPacketEntry		*entry;
-	char        		*data;
+	char			*data;
 	unsigned		scm_len;
 	int			*scm;
 };
@@ -126,7 +128,7 @@ static int dump_packet_cmsg(struct msghdr *mh, SkPacketEntry *pe)
 			if (n_rights) {
 				/*
 				 * Even if user is sending more than one cmsg with
-				 * rights, kernel merges them alltogether on recv.
+				 * rights, kernel merges them altogether on recv.
 				 */
 				pr_err("Unexpected 2nd SCM_RIGHTS from the kernel\n");
 				return -1;
@@ -271,6 +273,8 @@ err_set_sock:
 		pr_perror("setsockopt failed on restore");
 		ret = -1;
 	}
+	if (pe.scm)
+		release_cmsg(&pe);
 err_brk:
 	xfree(data);
 	return ret;

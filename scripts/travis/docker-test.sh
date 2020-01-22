@@ -12,7 +12,7 @@ curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
 add-apt-repository \
    "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
    $(lsb_release -cs) \
-   stable"
+   stable test"
 
 
 apt-get update -qq
@@ -39,7 +39,7 @@ docker info
 
 criu --version
 
-docker run --tmpfs /tmp --tmpfs /run --read-only --security-opt=seccomp:unconfined --name cr -d alpine /bin/sh -c 'i=0; while true; do echo $i; i=$(expr $i + 1); sleep 1; done'
+docker run --tmpfs /tmp --tmpfs /run --read-only --security-opt seccomp=unconfined --name cr -d alpine /bin/sh -c 'i=0; while true; do echo $i; i=$(expr $i + 1); sleep 1; done'
 
 sleep 1
 for i in `seq 50`; do
@@ -50,6 +50,8 @@ for i in `seq 50`; do
 	docker exec cr ps axf &&
 	docker checkpoint create cr checkpoint$i &&
 	sleep 1 &&
+	docker ps &&
+	(docker exec cr true && exit 1 || exit 0) &&
 	docker start --checkpoint checkpoint$i cr 2>&1 | tee log || {
 		cat "`cat log | grep 'log file:' | sed 's/log file:\s*//'`" || true
 		docker logs cr || true

@@ -17,6 +17,10 @@
 #include <libnl3/netlink/msg.h>
 #include <libnl3/netlink/netlink.h>
 
+#ifdef CONFIG_HAS_SELINUX
+#include <selinux/selinux.h>
+#endif
+
 #include "../soccr/soccr.h"
 
 #include "imgset.h"
@@ -40,6 +44,7 @@
 
 #include "protobuf.h"
 #include "images/netdev.pb-c.h"
+#include "images/inventory.pb-c.h"
 
 #ifndef IFLA_LINK_NETNSID
 #define IFLA_LINK_NETNSID	37
@@ -339,7 +344,7 @@ static int ipv6_conf_op(char *tgt, SysctlEntry **conf, int n, int op, SysctlEntr
  * the kernel, simply write DEVCONFS_UNUSED
  * into the image so we would skip it.
  */
-#define DEVCONFS_UNUSED        (-1u)
+#define DEVCONFS_UNUSED		(-1u)
 
 static int ipv4_conf_op_old(char *tgt, int *conf, int n, int op, int *def_conf)
 {
@@ -1233,7 +1238,7 @@ static int veth_peer_info(struct net_link *link, struct newlink_req *req,
 		return 0;
 	}
 out:
-	pr_err("Unknown peer net namespace");
+	pr_err("Unknown peer net namespace\n");
 	return -1;
 }
 
@@ -1524,7 +1529,7 @@ static int __restore_link(struct ns_id *ns, struct net_link *link, int nlsk)
 	case ND_TYPE__VETH:
 		return restore_one_link(ns, link, nlsk, veth_link_info, NULL);
 	case ND_TYPE__TUN:
-		return restore_one_tun(link, nlsk);
+		return restore_one_tun(ns, link, nlsk);
 	case ND_TYPE__BRIDGE:
 		return restore_one_link(ns, link, nlsk, bridge_link_info, NULL);
 	case ND_TYPE__MACVLAN:
@@ -1703,7 +1708,7 @@ static int restore_links()
 		if (nrcreated == nrlinks)
 			break;
 		if (nrcreated == 0) {
-			pr_err("Unable to restore network links");
+			pr_err("Unable to restore network links\n");
 			return -1;
 		}
 	}
@@ -1717,7 +1722,7 @@ static int run_ip_tool(char *arg1, char *arg2, char *arg3, char *arg4, int fdin,
 	char *ip_tool_cmd;
 	int ret;
 
-	pr_debug("\tRunning ip %s %s %s %s\n", arg1, arg2, arg3 ? : "\0", arg4 ? : "\0");
+	pr_debug("\tRunning ip %s %s %s %s\n", arg1, arg2, arg3 ? : "", arg4 ? : "");
 
 	ip_tool_cmd = getenv("CR_IP_TOOL");
 	if (!ip_tool_cmd)
@@ -1727,7 +1732,7 @@ static int run_ip_tool(char *arg1, char *arg2, char *arg3, char *arg4, int fdin,
 				(char *[]) { "ip", arg1, arg2, arg3, arg4, NULL }, flags);
 	if (ret) {
 		if (!(flags & CRS_CAN_FAIL))
-			pr_err("IP tool failed on %s %s %s %s\n", arg1, arg2, arg3 ? : "\0", arg4 ? : "\0");
+			pr_err("IP tool failed on %s %s %s %s\n", arg1, arg2, arg3 ? : "", arg4 ? : "");
 		return -1;
 	}
 
@@ -2048,25 +2053,47 @@ out:
 	return ret;
 }
 
+int read_net_ns_img(void)
+{
+	struct ns_id *ns;
+
+	for (ns = ns_ids; ns != NULL; ns = ns->next) {
+		struct cr_img *img;
+		int ret;
+
+		if (ns->nd != &net_ns_desc)
+			continue;
+
+		img = open_image(CR_FD_NETNS, O_RSTR, ns->id);
+		if (!img)
+			return -1;
+
+		if (empty_image(img)) {
+			/* Backward compatibility */
+			close_image(img);
+			continue;
+		}
+
+		ret = pb_read_one(img, &ns->net.netns, PB_NETNS);
+		close_image(img);
+		if (ret < 0) {
+			pr_err("Can not read netns object\n");
+			return -1;
+		}
+		ns->ext_key = ns->net.netns->ext_key;
+	}
+
+	return 0;
+}
+
 static int restore_netns_conf(struct ns_id *ns)
 {
-	NetnsEntry *netns;
+	NetnsEntry *netns = ns->net.netns;
 	int ret = 0;
-	struct cr_img *img;
 
-	img = open_image(CR_FD_NETNS, O_RSTR, ns->id);
-	if (!img)
-		return -1;
-
-	if (empty_image(img))
+	if (ns->net.netns == NULL)
 		/* Backward compatibility */
 		goto out;
-
-	ret = pb_read_one(img, &netns, PB_NETNS);
-	if (ret < 0) {
-		pr_err("Can not read netns object\n");
-		return -1;
-	}
 
 	if ((netns)->def_conf4) {
 		ret = ipv4_conf_op("all", (netns)->all_conf4, (netns)->n_all_conf4, CTL_WRITE, NULL);
@@ -2094,7 +2121,6 @@ static int restore_netns_conf(struct ns_id *ns)
 
 	ns->net.netns = netns;
 out:
-	close_image(img);
 	return ret;
 }
 
@@ -2159,7 +2185,7 @@ static int collect_netns_id(struct ns_id *ns, void *oarg)
 	if (!netns_id)
 		return -1;
 
-	pr_debug("Fount the %d id for %d in %d\n", nsid, ns->id, arg->ns->id);
+	pr_debug("Found the %d id for %d in %d\n", nsid, ns->id, arg->ns->id);
 	netns_id->target_ns_id = ns->id;
 	netns_id->netnsid_value = nsid;
 
@@ -2178,6 +2204,22 @@ static int dump_netns_ids(int rtsk, struct ns_id *ns)
 			(void *)&arg);
 }
 
+int net_set_ext(struct ns_id *ns)
+{
+	int fd, ret;
+
+	fd = inherit_fd_lookup_id(ns->ext_key);
+	if (fd < 0) {
+		pr_err("Unable to find an external netns: %s\n", ns->ext_key);
+		return -1;
+	}
+
+	ret = switch_ns_by_fd(fd, &net_ns_desc, NULL);
+	close(fd);
+
+	return ret;
+}
+
 int dump_net_ns(struct ns_id *ns)
 {
 	struct cr_imgset *fds;
@@ -2188,7 +2230,14 @@ int dump_net_ns(struct ns_id *ns)
 		return -1;
 
 	ret = mount_ns_sysfs();
-	if (!(opts.empty_ns & CLONE_NEWNET)) {
+	if (ns->ext_key) {
+		NetnsEntry netns = NETNS_ENTRY__INIT;
+
+		netns.ext_key = ns->ext_key;
+		ret = pb_write_one(img_from_set(fds, CR_FD_NETNS), &netns, PB_NETNS);
+		if (ret)
+			goto out;
+	} else if (!(opts.empty_ns & CLONE_NEWNET)) {
 		int sk;
 
 		sk = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
@@ -2232,6 +2281,7 @@ int dump_net_ns(struct ns_id *ns)
 	if (!ret)
 		ret = dump_nf_ct(fds, CR_FD_NETNF_EXP);
 
+out:
 	close(ns_sysfs_fd);
 	ns_sysfs_fd = -1;
 
@@ -2285,7 +2335,7 @@ static int prepare_net_ns_first_stage(struct ns_id *ns)
 {
 	int ret = 0;
 
-	if (opts.empty_ns & CLONE_NEWNET)
+	if (ns->ext_key || (opts.empty_ns & CLONE_NEWNET))
 		return 0;
 
 	ret = restore_netns_conf(ns);
@@ -2301,7 +2351,7 @@ static int prepare_net_ns_second_stage(struct ns_id *ns)
 {
 	int ret = 0, nsid = ns->id;
 
-	if (!(opts.empty_ns & CLONE_NEWNET)) {
+	if (!(opts.empty_ns & CLONE_NEWNET) && !ns->ext_key) {
 		if (ns->net.netns)
 			netns_entry__free_unpacked(ns->net.netns, NULL);
 
@@ -2349,7 +2399,14 @@ static int open_net_ns(struct ns_id *nsid)
 
 static int do_create_net_ns(struct ns_id *ns)
 {
-	if (unshare(CLONE_NEWNET)) {
+	int ret;
+
+	if (ns->ext_key)
+		ret = net_set_ext(ns);
+	else
+		ret = unshare(CLONE_NEWNET);
+
+	if (ret) {
 		pr_perror("Unable to create a new netns");
 		return -1;
 	}
@@ -2497,13 +2554,12 @@ int netns_keep_nsfd(void)
 		pr_err("Can't install ns net reference\n");
 	else
 		pr_info("Saved netns fd for links restore\n");
-	close(ns_fd);
 
 	return ret >= 0 ? 0 : -1;
 }
 
 /*
- * If we want to modify iptables, we need to recevied the current
+ * If we want to modify iptables, we need to received the current
  * configuration, change it and load a new one into the kernel.
  * iptables can change or add only one rule.
  * iptables-restore allows to make a few changes for one iteration,
@@ -2667,6 +2723,54 @@ static int prep_ns_sockets(struct ns_id *ns, bool for_dump)
 	} else
 		ns->net.nlsk = -1;
 
+#ifdef CONFIG_HAS_SELINUX
+	/*
+	 * If running on a system with SELinux enabled the socket for the
+	 * communication between parasite daemon and the main
+	 * CRIU process needs to be correctly labeled.
+	 * Initially this was motivated by Podman's use case: The container
+	 * is usually running as something like '...:...:container_t:...:....'
+	 * and CRIU started from runc and Podman will run as
+	 * '...:...:container_runtime_t:...:...'. As the parasite will be
+	 * running with the same context as the container process: 'container_t'.
+	 * Allowing a container process to connect via socket to the outside
+	 * of the container ('container_runtime_t') is not desired and
+	 * therefore CRIU needs to label the socket with the context of
+	 * the container: 'container_t'.
+	 * So this first gets the context of the root container process
+	 * and tells SELinux to label the next created socket with
+	 * the same label as the root container process.
+	 * For this to work it is necessary to have the correct SELinux
+	 * policies installed. For Fedora based systems this is part
+	 * of the container-selinux package.
+	 */
+	security_context_t ctx;
+
+	/*
+	 * This assumes that all processes CRIU wants to dump are labeled
+	 * with the same SELinux context. If some of the child processes
+	 * have different labels this will not work and needs additional
+	 * SELinux policies. But the whole SELinux socket labeling relies
+	 * on the correct SELinux being available.
+	 */
+	if (kdat.lsm == LSMTYPE__SELINUX) {
+		ret = getpidcon_raw(root_item->pid->real, &ctx);
+		if (ret < 0) {
+			pr_perror("Getting SELinux context for PID %d failed",
+				  root_item->pid->real);
+			goto err_sq;
+		}
+
+		ret = setsockcreatecon(ctx);
+		freecon(ctx);
+		if (ret < 0) {
+			pr_perror("Setting SELinux socket context for PID %d failed",
+				  root_item->pid->real);
+			goto err_sq;
+		}
+	}
+#endif
+
 	ret = ns->net.seqsk = socket(PF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
 	if (ret < 0) {
 		pr_perror("Can't create seqsk for parasite");
@@ -2674,6 +2778,23 @@ static int prep_ns_sockets(struct ns_id *ns, bool for_dump)
 	}
 
 	ret = 0;
+
+#ifdef CONFIG_HAS_SELINUX
+	/*
+	 * Once the socket has been created, reset the SELinux socket labelling
+	 * back to the default value of this process.
+	 */
+	if (kdat.lsm == LSMTYPE__SELINUX) {
+		ret = setsockcreatecon_raw(NULL);
+		if (ret < 0) {
+			pr_perror("Resetting SELinux socket context to "
+				  "default for PID %d failed",
+				  root_item->pid->real);
+			goto err_ret;
+		}
+	}
+#endif
+
 out:
 	if (nsret >= 0 && restore_ns(nsret, &net_ns_desc) < 0) {
 		nsret = -1;
@@ -2696,9 +2817,18 @@ static int netns_nr;
 static int collect_net_ns(struct ns_id *ns, void *oarg)
 {
 	bool for_dump = (oarg == (void *)1);
+	char id[64], *val;
 	int ret;
 
 	pr_info("Collecting netns %d/%d\n", ns->id, ns->ns_pid);
+
+	snprintf(id, sizeof(id), "net[%u]", ns->kid);
+	val = external_lookup_by_key(id);
+	if (!IS_ERR_OR_NULL(val)) {
+		pr_debug("The %s netns is external\n", id);
+		ns->ext_key = val;
+	}
+
 	ret = prep_ns_sockets(ns, for_dump);
 	if (ret)
 		return ret;
@@ -2746,7 +2876,7 @@ struct ns_id *get_socket_ns(int lfd)
 
 	ns_fd = ioctl(lfd, SIOCGSKNS);
 	if (ns_fd < 0) {
-		/* backward compatiblity with old kernels */
+		/* backward compatibility with old kernels */
 		if (netns_nr == 1)
 			return net_get_root_ns();
 
@@ -2889,22 +3019,22 @@ int move_veth_to_bridge(void)
 #ifndef NETNSA_MAX
 /* Attributes of RTM_NEWNSID/RTM_GETNSID messages */
 enum {
-        NETNSA_NONE,
+	NETNSA_NONE,
 #define NETNSA_NSID_NOT_ASSIGNED -1
-        NETNSA_NSID,
-        NETNSA_PID,
-        NETNSA_FD,
-        __NETNSA_MAX,
+	NETNSA_NSID,
+	NETNSA_PID,
+	NETNSA_FD,
+	__NETNSA_MAX,
 };
 
-#define NETNSA_MAX              (__NETNSA_MAX - 1)
+#define NETNSA_MAX		(__NETNSA_MAX - 1)
 #endif
 
 static struct nla_policy rtnl_net_policy[NETNSA_MAX + 1] = {
-        [NETNSA_NONE]           = { .type = NLA_UNSPEC },
-        [NETNSA_NSID]           = { .type = NLA_S32 },
-        [NETNSA_PID]            = { .type = NLA_U32 },
-        [NETNSA_FD]             = { .type = NLA_U32 },
+	[NETNSA_NONE]		= { .type = NLA_UNSPEC },
+	[NETNSA_NSID]		= { .type = NLA_S32 },
+	[NETNSA_PID]		= { .type = NLA_U32 },
+	[NETNSA_FD]		= { .type = NLA_U32 },
 };
 
 static int nsid_cb(struct nlmsghdr *msg, struct ns_id *ns, void *arg)
@@ -3061,12 +3191,6 @@ int kerndat_link_nsid()
 		};
 		int nsfd, sk, ret;
 
-		sk = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
-		if (sk < 0) {
-			pr_perror("Unable to create a netlink socket");
-			exit(1);
-		}
-
 		if (unshare(CLONE_NEWNET)) {
 			pr_perror("Unable create a network namespace");
 			exit(1);
@@ -3078,6 +3202,12 @@ int kerndat_link_nsid()
 
 		if (unshare(CLONE_NEWNET)) {
 			pr_perror("Unable create a network namespace");
+			exit(1);
+		}
+
+		sk = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+		if (sk < 0) {
+			pr_perror("Unable to create a netlink socket");
 			exit(1);
 		}
 

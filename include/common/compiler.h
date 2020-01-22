@@ -8,6 +8,7 @@
  */
 
 #define ARRAY_SIZE(x)		(sizeof(x) / sizeof((x)[0]))
+#define NELEMS_AS_ARRAY(x,y)	(sizeof(x) / sizeof((y)[0]))
 #define BUILD_BUG_ON(condition)	((void)sizeof(char[1 - 2*!!(condition)]))
 
 #define ASSIGN_TYPED(a, b)	do { (a) = (typeof(a))(b); } while (0)
@@ -56,6 +57,10 @@
 #define container_of(ptr, type, member) ({			\
 	const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
+
+#ifndef FIELD_SIZEOF
+# define FIELD_SIZEOF(t, f)	(sizeof(((t*)0)->f))
+#endif
 
 #define __round_mask(x, y)	((__typeof__(x))((y) - 1))
 #define round_up(x, y)		((((x) - 1) | __round_mask(x, y)) + 1)

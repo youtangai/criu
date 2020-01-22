@@ -2,9 +2,6 @@
 #define __CR_PARASITE_VDSO_H__
 
 #include "common/config.h"
-
-#ifdef CONFIG_VDSO
-
 #include "util-vdso.h"
 #include "images/vma.pb-c.h"
 
@@ -84,21 +81,15 @@ static inline bool is_vdso_mark(void *addr)
 	return false;
 }
 
+extern void vdso_update_gtod_addr(struct vdso_maps *rt);
 extern int vdso_do_park(struct vdso_maps *rt, unsigned long park_at,
 			unsigned long park_size);
 extern int vdso_map_compat(unsigned long map_at);
-extern int vdso_proxify(struct vdso_symtable *sym_rt,
-			unsigned long vdso_rt_parked_at,
+extern int vdso_proxify(struct vdso_maps *rt, bool *added_proxy,
 			VmaEntry *vmas, size_t nr_vmas,
 			bool compat_vdso, bool force_trampolines);
 extern int vdso_redirect_calls(unsigned long base_to, unsigned long base_from,
 			struct vdso_symtable *to, struct vdso_symtable *from,
 			bool compat_vdso);
-
-#else /* CONFIG_VDSO */
-#define vdso_do_park(sym_rt, park_at, park_size)		(0)
-#define vdso_map_compat(map_at)					(0)
-
-#endif /* CONFIG_VDSO */
 
 #endif /* __CR_PARASITE_VDSO_H__ */

@@ -111,6 +111,16 @@ message criu_opts {
 	optional bool			lazy_pages		= 48;
 	optional int32			status_fd		= 49;
 	optional bool			orphan_pts_master	= 50;
+	optional string			config_file		= 51;
+	optional bool			tcp_close		= 52;
+	optional string			lsm_profile		= 53;
+	optional string			tls_cacert		= 54;
+	optional string			tls_cacrl		= 55;
+	optional string			tls_cert		= 56;
+	optional string			tls_key			= 57;
+	optional bool			tls			= 58;
+	optional bool			tls_no_cn_verify	= 59;
+/*	optional bool			check_mounts		= 128;	*/
 }
 
 message criu_dump_resp {
@@ -208,8 +218,8 @@ message criu_resp {
 
 /* Answer for criu_req_type.VERSION requests */
 message criu_version {
-	required int32			major		= 1;
-	required int32			minor		= 2;
+	required int32			major_number	= 1;
+	required int32			minor_number	= 2;
 	optional string			gitid		= 3;
 	optional int32			sublevel	= 4;
 	optional int32			extra		= 5;

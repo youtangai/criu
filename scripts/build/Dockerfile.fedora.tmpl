@@ -6,6 +6,7 @@ RUN dnf install -y \
 	findutils \
 	gcc \
 	git \
+	gnutls-devel \
 	iproute \
 	iptables \
 	libaio-devel \
@@ -17,22 +18,17 @@ RUN dnf install -y \
 	procps-ng \
 	protobuf-c-devel \
 	protobuf-devel \
-	python2-protobuf \
-	python2 \
-	# Starting with Fedora 28 this is python2-ipaddress
-	python-ipaddress \
-	# Starting with Fedora 28 this is python2-pyyaml
-	python-yaml \
-	python3-pip \
-	python2-future \
+	python3-flake8 \
 	python3-PyYAML \
 	python3-future \
 	python3-protobuf \
 	python3-junit_xml \
+	sudo \
 	tar \
 	which \
 	e2fsprogs \
-	asciidoc xmlto
+	rubygem-asciidoctor \
+	kmod
 
 # Replace coreutils-single with "traditional" coreutils
 # to fix the following error on Fedora 28/rawhide while
@@ -41,6 +37,7 @@ RUN dnf install -y \
 RUN dnf install -y --allowerasing coreutils
 
 RUN ln -sf python3 /usr/bin/python
+ENV PYTHON=python3
 
 COPY . /criu
 WORKDIR /criu
@@ -48,5 +45,9 @@ WORKDIR /criu
 ENV CCACHE_DIR=/tmp/.ccache CCACHE_NOCOMPRESS=1 $ENV1=yes
 RUN mv .ccache /tmp && make mrproper && ccache -sz  && \
 	date && make -j $(nproc) CC="$CC" && date && ccache -s
+
+# The rpc test cases are running as user #1000, let's add the user
+RUN adduser -u 1000 test
+
 RUN make -C test/zdtm -j $(nproc)
 

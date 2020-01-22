@@ -39,7 +39,7 @@ struct rt_sigframe {
 			"svc #0						\n"	\
 			:							\
 			: "r"(new_sp)						\
-			: "sp", "x8", "memory")
+			: "x8", "memory")
 
 /* cr_sigcontext is copied from arch/arm64/include/uapi/asm/sigcontext.h */
 struct cr_sigcontext {
@@ -60,5 +60,10 @@ struct cr_sigcontext {
 #define RT_SIGFRAME_AUX_CONTEXT(rt_sigframe)	((struct aux_context*)&(RT_SIGFRAME_SIGCONTEXT(rt_sigframe)->__reserved))
 #define RT_SIGFRAME_FPU(rt_sigframe)		(&RT_SIGFRAME_AUX_CONTEXT(rt_sigframe)->fpsimd)
 #define RT_SIGFRAME_OFFSET(rt_sigframe)		0
+
+#define rt_sigframe_erase_sigset(sigframe)				\
+	memset(&sigframe->uc.uc_sigmask, 0, sizeof(k_rtsigset_t))
+#define rt_sigframe_copy_sigset(sigframe, from)				\
+	memcpy(&sigframe->uc.uc_sigmask, from, sizeof(k_rtsigset_t))
 
 #endif /* UAPI_COMPEL_ASM_SIGFRAME_H__ */

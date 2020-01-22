@@ -165,6 +165,13 @@ void write_stats(int what)
 		ds_entry.page_pipe_bufs = dstats->counts[CNT_PAGE_PIPE_BUFS];
 		ds_entry.has_page_pipe_bufs = true;
 
+		ds_entry.shpages_scanned = dstats->counts[CNT_SHPAGES_SCANNED];
+		ds_entry.has_shpages_scanned = true;
+		ds_entry.shpages_skipped_parent = dstats->counts[CNT_SHPAGES_SKIPPED_PARENT];
+		ds_entry.has_shpages_skipped_parent = true;
+		ds_entry.shpages_written = dstats->counts[CNT_SHPAGES_WRITTEN];
+		ds_entry.has_shpages_written = true;
+
 		name = "dump";
 	} else if (what == RESTORE_STATS) {
 		stats.restore = &rs_entry;
@@ -194,7 +201,15 @@ void write_stats(int what)
 int init_stats(int what)
 {
 	if (what == DUMP_STATS) {
-		dstats = xzalloc(sizeof(*dstats));
+		/*
+		 * Dumping happens via one process most of the time,
+		 * so we are typically OK with the plain malloc, but
+		 * when dumping namespaces we fork() a separate process
+		 * for it and when it goes and dumps shmem segments
+		 * it will alter the CNT_SHPAGES_ counters, so we need
+		 * to have them in shmem.
+		 */
+		dstats = shmalloc(sizeof(*dstats));
 		return dstats ? 0 : -1;
 	}
 

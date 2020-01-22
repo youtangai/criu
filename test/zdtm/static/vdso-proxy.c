@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -7,7 +8,11 @@ const char *test_doc	= "Compare mappings before/after C/R for vdso/vvar presence
 const char *test_author	= "Dmitry Safonov <dsafonov@virtuozzo.com>";
 
 #define BUILD_BUG_ON(condition)	((void)sizeof(char[1 - 2*!!(condition)]))
-#define VDSO_BAD_ADDR		(-1ul)
+#define VSYSCALL_START 0xffffffffff600000ULL
+/*
+ * Use constant MAX_VMAS - to minimize the risk of allocating a new
+ * mapping or changing the size of existent VMA with realloc()
+ */
 #define MAX_VMAS		80
 #define BUF_SIZE		1024
 
@@ -18,8 +23,13 @@ const char *test_author	= "Dmitry Safonov <dsafonov@virtuozzo.com>";
  * Also previous vdso/vvar vma should still be present after C/R.
  */
 struct vm_area {
-	unsigned long start;
-	unsigned long end;
+	/*
+	 * Intentionally use 64bit integer to make sure that it's possible
+	 * to parse mappings >4Gb - those might appear on ia32
+	 * that's restored by x86_64 CRIU ¯\(°_o)/¯
+	 */
+	uint64_t start;
+	uint64_t end;
 	bool is_vvar_or_vdso;
 };
 
@@ -43,20 +53,33 @@ static int parse_maps(struct vm_area *vmas)
 		if (fgets(buf, BUF_SIZE, maps) == NULL)
 			break;
 
-		v->start = strtoul(buf, &end, 16);
-		v->end = strtoul(end + 1, NULL, 16);
+		v->start = strtoull(buf, &end, 16);
+		v->end = strtoull(end + 1, NULL, 16);
+
+#if defined(__i386__)
+		/*
+		 * XXX: ia32 is being restored from x86_64 and leaves
+		 * emulated vsyscall "mapping". Hopefully, will be done
+		 * per-process, ignore for now.
+		 */
+		if (v->start == VSYSCALL_START) {
+			i--;
+			continue;
+		}
+#endif
 		v->is_vvar_or_vdso |= strstr(buf, "[vdso]") != NULL;
 		v->is_vvar_or_vdso |= strstr(buf, "[vvar]") != NULL;
-		test_msg("[NOTE]\tVMA: [%#lx, %#lx]\n", v->start, v->end);
-	}
-
-	if (i == MAX_VMAS) {
-		pr_err("Number of VMAs is bigger than reserved array's size\n");
-		return -1;
+		test_msg("[NOTE]\tVMA: [%#" PRIx64 ", %#" PRIx64 "]\n",
+				v->start, v->end);
 	}
 
 	if (fclose(maps)) {
 		pr_err("Failed to close maps file: %m\n");
+		return -1;
+	}
+
+	if (i == MAX_VMAS) {
+		pr_err("Number of VMAs is bigger than reserved array's size\n");
 		return -1;
 	}
 
@@ -88,7 +111,7 @@ static int check_vvar_vdso(struct vm_area *before, struct vm_area *after)
 			continue;
 
 		if (cmp < 0) {/* Lost mapping */
-			test_msg("[NOTE]\tLost mapping: %#lx-%#lx\n",
+			test_msg("[NOTE]\tLost mapping: %#" PRIx64 "-%#" PRIx64 "\n",
 				before[i].start, before[i].end);
 			j--;
 			if (before[i].is_vvar_or_vdso) {
@@ -98,7 +121,7 @@ static int check_vvar_vdso(struct vm_area *before, struct vm_area *after)
 			continue;
 		}
 
-		test_msg("[NOTE]\tNew mapping appeared: %#lx-%#lx\n",
+		test_msg("[NOTE]\tNew mapping appeared: %#" PRIx64 "-%#" PRIx64 "\n",
 			after[j].start, after[j].end);
 		i--;
 	}
@@ -118,7 +141,7 @@ int main(int argc, char *argv[])
 	test_msg("[NOTE]\tMappings before:\n");
 	nr_before = parse_maps(vmas_before);
 	if (nr_before < 0) {
-		pr_perror("Faied to parse maps");
+		pr_perror("Failed to parse maps");
 		return -1;
 	}
 
@@ -128,7 +151,7 @@ int main(int argc, char *argv[])
 	test_msg("[NOTE]\tMappings after:\n");
 	nr_after = parse_maps(vmas_after);
 	if (nr_after < 0) {
-		pr_perror("Faied to parse maps");
+		pr_perror("Failed to parse maps");
 		return -1;
 	}
 

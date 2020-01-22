@@ -15,6 +15,7 @@
 #include "images/fown.pb-c.h"
 #include "images/vma.pb-c.h"
 
+struct parasite_drain_fd;
 struct pstree_item;
 struct file_desc;
 struct cr_imgset;
@@ -50,6 +51,7 @@ struct fd_parms {
 	int		mnt_id;
 
 	struct parasite_ctl *fd_ctl;
+	struct parasite_drain_fd *dfds;
 };
 
 #define FD_PARMS_INIT			\
@@ -61,6 +63,7 @@ struct fd_parms {
 }
 
 extern int fill_fdlink(int lfd, const struct fd_parms *p, struct fd_link *link);
+extern uint32_t make_gen_id(uint32_t st_dev, uint32_t st_ino, uint64_t pos);
 
 struct file_desc;
 
@@ -187,8 +190,7 @@ extern int dump_unsupp_fd(struct fd_parms *p, int lfd,
 extern int inherit_fd_parse(char *optarg);
 extern int inherit_fd_add(int fd, char *key);
 extern void inherit_fd_log(void);
-extern int inherit_fd_resolve_clash(int fd);
-extern int inherit_fd_fini(void);
+extern int inherit_fd_move_to_fdstore(void);
 
 extern int inherit_fd_lookup_id(char *id);
 

@@ -1,7 +1,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <errno.h>
-#include <dirent.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -38,6 +37,7 @@
 #include "page-xfer.h"
 #include "common/lock.h"
 #include "rst-malloc.h"
+#include "tls.h"
 #include "fdstore.h"
 #include "util.h"
 
@@ -61,7 +61,7 @@
 
 /*
  * Backround transfer parameters.
- * The default xfer length is arbitraty set to 64Kbytes
+ * The default xfer length is arbitrary set to 64Kbytes
  * The limit of 4Mbytes matches the maximal chunk size we can have in
  * a pipe in the page-server
  */
@@ -494,7 +494,7 @@ static int copy_iovs(struct lazy_pages_info *src, struct lazy_pages_info *dst)
 		goto free_iovs;
 
 	/*
-	 * The IOVs aready in flight for the parent process need to be
+	 * The IOVs already in flight for the parent process need to be
 	 * transferred again for the child process
 	 */
 	merge_iov_lists(&dst->reqs, &dst->iovs);
@@ -771,7 +771,7 @@ static int ud_open(int client, struct lazy_pages_info **_lpi)
 		pr_flags |= PR_REMOTE;
 	ret = open_page_read(lpi->pid, &lpi->pr, pr_flags);
 	if (ret <= 0) {
-		ret = -1;
+		lp_err(lpi, "Failed to open pagemap\n");
 		goto out;
 	}
 
@@ -989,9 +989,9 @@ static struct lazy_iov *pick_next_range(struct lazy_pages_info *lpi)
 }
 
 /*
- * This is very simple heurstics for backgroud transfer control.
+ * This is very simple heurstics for background transfer control.
  * The idea is to transfer larger chunks when there is no page faults
- * and drop the backgroud transfer size each time #PF occurs to some
+ * and drop the background transfer size each time #PF occurs to some
  * default value. The default is empirically set to 64Kbytes
  */
 static void update_xfer_len(struct lazy_pages_info *lpi, bool pf)
@@ -1340,7 +1340,7 @@ static int lazy_sk_read_event(struct epoll_rfd *rfd)
 	ret = recv(rfd->fd, &fin, sizeof(fin), 0);
 	/*
 	 * epoll sets POLLIN | POLLHUP for the EOF case, so we get short
-	 * read just befor hangup_event
+	 * read just before hangup_event
 	 */
 	if (!ret)
 		return 0;
@@ -1417,7 +1417,7 @@ int cr_lazy_pages(bool daemon)
 	int lazy_sk;
 	int ret;
 
-	if (kerndat_uffd() || !kdat.has_uffd)
+	if (!kdat.has_uffd)
 		return -1;
 
 	if (prepare_dummy_pstree())
@@ -1428,7 +1428,7 @@ int cr_lazy_pages(bool daemon)
 		return -1;
 
 	if (daemon) {
-		ret = cr_daemon(1, 0, &lazy_sk, -1);
+		ret = cr_daemon(1, 0, -1);
 		if (ret == -1) {
 			pr_err("Can't run in the background\n");
 			return -1;
@@ -1469,6 +1469,8 @@ int cr_lazy_pages(bool daemon)
 	}
 
 	ret = handle_requests(epollfd, events, nr_fds);
+
+	tls_terminate_session();
 
 	return ret;
 }

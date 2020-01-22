@@ -69,8 +69,10 @@ struct thread_creds_args {
 	unsigned int			secbits;
 	char				*lsm_profile;
 	unsigned int			*groups;
+	char				*lsm_sockcreate;
 
 	unsigned long			mem_lsm_profile_pos;
+	unsigned long			mem_lsm_sockcreate_pos;
 	unsigned long			mem_groups_pos;
 
 	unsigned long			mem_pos_next;
@@ -110,6 +112,8 @@ struct thread_restore_args {
 	void				*seccomp_filters_data;
 	unsigned int			seccomp_filters_n;
 	bool				seccomp_force_tsync;
+
+	char				comm[TASK_COMM_LEN];
 } __aligned(64);
 
 typedef long (*thread_restore_fcall_t) (struct thread_restore_args *args);
@@ -173,6 +177,9 @@ struct task_restore_args {
 	pid_t				*zombies;
 	unsigned int			zombies_n;
 
+	int				*inotify_fds; /* fds to cleanup inotify events at CR_STATE_RESTORE_SIGCHLD stage */
+	unsigned int			inotify_fds_n;
+
 	/* * * * * * * * * * * * * * * * * * * * */
 
 	unsigned long			task_size;
@@ -202,17 +209,18 @@ struct task_restore_args {
 	bool				compatible_mode;
 
 	bool				can_map_vdso;
-#ifdef CONFIG_VDSO
+	bool				auto_dedup;
 	unsigned long			vdso_rt_size;
 	struct vdso_maps		vdso_maps_rt;		/* runtime vdso symbols */
 	unsigned long			vdso_rt_parked_at;	/* safe place to keep vdso */
-#endif
 	void				**breakpoint;
 
 	enum faults			fault_strategy;
 #ifdef ARCH_HAS_LONG_PAGES
 	unsigned			page_size;
 #endif
+	int				lsm_type;
+	int				child_subreaper;
 } __aligned(64);
 
 /*

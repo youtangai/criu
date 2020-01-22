@@ -11,6 +11,7 @@
 #include "image.h"
 #include "cr_options.h"
 #include "kerndat.h"
+#include "stats.h"
 #include "page-pipe.h"
 #include "page-xfer.h"
 #include "rst-malloc.h"
@@ -42,8 +43,8 @@
 #define SHMEM_HASH_SIZE	32
 static struct hlist_head shmems_hash[SHMEM_HASH_SIZE];
 
-#define for_each_shmem(_i, _si)				\
-	for (i = 0; i < SHMEM_HASH_SIZE; i++)			\
+#define for_each_shmem(_i, _si)					\
+	for (_i = 0; _i < SHMEM_HASH_SIZE; _i++)		\
 		hlist_for_each_entry(_si, &shmems_hash[_i], h)
 
 struct shmem_info {
@@ -178,11 +179,12 @@ static void set_pstate(unsigned long *pstate_map, unsigned long pfn,
 
 static int expand_shmem(struct shmem_info *si, unsigned long new_size)
 {
-	unsigned long nr_pages, nr_map_items, map_size,
-				nr_new_map_items, new_map_size, old_size;
+	unsigned long nr_pages, nr_map_items, map_size;
+	unsigned long nr_new_map_items, new_map_size, old_size;
 
 	old_size = si->size;
 	si->size = new_size;
+
 	if (!is_shmem_tracking_en())
 		return 0;
 
@@ -196,8 +198,7 @@ static int expand_shmem(struct shmem_info *si, unsigned long new_size)
 
 	BUG_ON(new_map_size < map_size);
 
-	si->pstate_map = xrealloc(si->pstate_map, new_map_size);
-	if (!si->pstate_map)
+	if (xrealloc_safe(&si->pstate_map, new_map_size))
 		return -1;
 	memzero(si->pstate_map + nr_map_items, new_map_size - map_size);
 	return 0;
@@ -233,7 +234,7 @@ int collect_sysv_shmem(unsigned long shmid, unsigned long size)
 	 * Tasks will not modify this object, so don't
 	 * shmalloc() as we do it for anon shared mem
 	 */
-	si = malloc(sizeof(*si));
+	si = xmalloc(sizeof(*si));
 	if (!si)
 		return -1;
 
@@ -676,6 +677,7 @@ static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
 	struct page_xfer xfer;
 	int err, ret = -1;
 	unsigned long pfn, nrpages, next_data_pnf = 0, next_hole_pfn = 0;
+	unsigned long pages[2] = {};
 
 	nrpages = (si->size + PAGE_SIZE - 1) / PAGE_SIZE;
 
@@ -693,6 +695,7 @@ static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
 		unsigned int pgstate = PST_DIRTY;
 		bool use_mc = true;
 		unsigned long pgaddr;
+		int st = -1;
 
 		if (pfn >= next_hole_pfn &&
 		    next_data_segment(fd, pfn, &next_data_pnf, &next_hole_pfn))
@@ -714,10 +717,13 @@ static int do_dump_one_shmem(int fd, void *addr, struct shmem_info *si)
 again:
 		if (pgstate == PST_ZERO)
 			ret = 0;
-		else if (xfer.parent && page_in_parent(pgstate == PST_DIRTY))
+		else if (xfer.parent && page_in_parent(pgstate == PST_DIRTY)) {
 			ret = page_pipe_add_hole(pp, pgaddr, PP_HOLE_PARENT);
-		else
+			st = 0;
+		} else {
 			ret = page_pipe_add_page(pp, pgaddr, 0);
+			st = 1;
+		}
 
 		if (ret == -EAGAIN) {
 			ret = dump_pages(pp, &xfer);
@@ -727,7 +733,14 @@ again:
 			goto again;
 		} else if (ret)
 			goto err_xfer;
+
+		if (st >= 0)
+			pages[st]++;
 	}
+
+	cnt_add(CNT_SHPAGES_SCANNED, nrpages);
+	cnt_add(CNT_SHPAGES_SKIPPED_PARENT, pages[0]);
+	cnt_add(CNT_SHPAGES_WRITTEN, pages[1]);
 
 	ret = dump_pages(pp, &xfer);
 

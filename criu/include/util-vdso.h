@@ -38,6 +38,7 @@ struct vdso_maps {
 	unsigned long		vdso_start;
 	unsigned long		vvar_start;
 	struct vdso_symtable	sym;
+	bool			compatible;
 };
 
 #define VDSO_SYMBOL_INIT	{ .offset = VDSO_BAD_ADDR, }
@@ -68,8 +69,14 @@ struct vdso_maps {
 #define Word_t		Elf32_Word
 #define Dyn_t		Elf32_Dyn
 
+#ifndef ELF_ST_TYPE
 #define ELF_ST_TYPE	ELF32_ST_TYPE
+#endif
+#ifndef ELF_ST_BIND
 #define ELF_ST_BIND	ELF32_ST_BIND
+#endif
+
+# define vdso_fill_symtable vdso_fill_symtable_compat
 
 #else /* CONFIG_VDSO_32 */
 
@@ -88,17 +95,6 @@ struct vdso_maps {
 
 #endif /* CONFIG_VDSO_32 */
 
-#if defined(CONFIG_VDSO_32)
-# define vdso_fill_symtable vdso_fill_symtable_compat
-#endif
-
 extern int vdso_fill_symtable(uintptr_t mem, size_t size, struct vdso_symtable *t);
-#if defined(CONFIG_X86_64) && defined(CONFIG_COMPAT)
-#ifndef ARCH_MAP_VDSO_32
-# define ARCH_MAP_VDSO_32	0x2002
-#endif
-extern int vdso_fill_symtable_compat(uintptr_t mem, size_t size,
-		struct vdso_symtable *t);
-#endif
 
 #endif /* __CR_UTIL_VDSO_H__ */

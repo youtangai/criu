@@ -502,7 +502,6 @@ err:
 	return -1;
 }
 
-#ifdef CONFIG_VDSO
 static inline int handle_vdso_vma(struct vma_area *vma)
 {
 	vma->e->status |= VMA_AREA_REGULAR;
@@ -518,19 +517,6 @@ static inline int handle_vvar_vma(struct vma_area *vma)
 		vma->e->status |= VMA_AREA_VVAR;
 	return 0;
 }
-#else
-static inline int handle_vdso_vma(struct vma_area *vma)
-{
-	pr_warn_once("Found vDSO area without support\n");
-	return -1;
-}
-
-static inline int handle_vvar_vma(struct vma_area *vma)
-{
-	pr_warn_once("Found VVAR area without support\n");
-	return -1;
-}
-#endif
 
 static int handle_vma(pid_t pid, struct vma_area *vma_area,
 			const char *file_path, DIR *map_files_dir,
@@ -674,14 +660,15 @@ static int vma_list_add(struct vma_area *vma_area,
 		unsigned long pages;
 
 		pages = vma_area_len(vma_area) / PAGE_SIZE;
-		vma_area_list->priv_size += pages;
-		vma_area_list->priv_longest = max(vma_area_list->priv_longest, pages);
+		vma_area_list->nr_priv_pages += pages;
+		vma_area_list->nr_priv_pages_longest =
+			max(vma_area_list->nr_priv_pages_longest, pages);
 	} else if (vma_area_is(vma_area, VMA_ANON_SHARED)) {
 		unsigned long pages;
 
 		pages = vma_area_len(vma_area) / PAGE_SIZE;
-		vma_area_list->shared_longest =
-			max(vma_area_list->shared_longest, pages);
+		vma_area_list->nr_shared_pages_longest =
+			max(vma_area_list->nr_shared_pages_longest, pages);
 	}
 
 	*prev_vfi = *vfi;
@@ -719,12 +706,7 @@ int parse_smaps(pid_t pid, struct vm_area_list *vma_area_list,
 	DIR *map_files_dir = NULL;
 	struct bfd f;
 
-	vma_area_list->nr = 0;
-	vma_area_list->nr_aios = 0;
-	vma_area_list->priv_longest = 0;
-	vma_area_list->priv_size = 0;
-	vma_area_list->shared_longest = 0;
-	INIT_LIST_HEAD(&vma_area_list->h);
+	vm_area_list_init(vma_area_list);
 
 	f.fd = open_proc(pid, "smaps");
 	if (f.fd < 0)
@@ -1762,9 +1744,23 @@ static int parse_fdinfo_pid_s(int pid, int fd, int type, void *arg)
 
 			eventpoll_tfd_entry__init(e);
 
-			ret = sscanf(str, "tfd: %d events: %x data: %"PRIx64,
-					&e->tfd, &e->events, &e->data);
-			if (ret != 3) {
+			ret = sscanf(str, "tfd: %d events: %x data: %llx"
+				     " pos:%lli ino:%lx sdev:%x",
+					&e->tfd, &e->events, (long long *)&e->data,
+					(long long *)&e->pos, (long *)&e->inode,
+					&e->dev);
+			if (ret < 3 || ret > 6) {
+				eventpoll_tfd_entry__free_unpacked(e, NULL);
+				goto parse_err;
+			} else if (ret == 3) {
+				e->has_dev = false;
+				e->has_inode = false;
+				e->has_pos = false;
+			} else if (ret == 6) {
+				e->has_dev = true;
+				e->has_inode = true;
+				e->has_pos = true;
+			} else if (ret < 6) {
 				eventpoll_tfd_entry__free_unpacked(e, NULL);
 				goto parse_err;
 			}
@@ -2263,6 +2259,7 @@ int parse_threads(int pid, struct pid **_t, int *_n)
 			tmp = xrealloc(t, nr * sizeof(struct pid));
 			if (!tmp) {
 				xfree(t);
+				closedir(dir);
 				return -1;
 			}
 			t = tmp;
