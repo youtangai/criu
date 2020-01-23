@@ -1433,7 +1433,7 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 
 	while (1) {
 		pid = waitpid(-1, &status, WNOHANG);
-		pr_info("youtangai: pid=%d", pid);
+		pr_info("youtangai: pid=%d\n", pid);
 		if (pid <= 0)
 			return;
 
