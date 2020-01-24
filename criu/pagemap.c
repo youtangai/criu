@@ -598,6 +598,7 @@ static void reset_pagemap(struct page_read *pr)
 
 static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int pr_flags)
 {
+	pr_debug("youtangai into try open parent\n");
 	int pfd, ret;
 	struct page_read *parent = NULL;
 
@@ -605,6 +606,7 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	if (pfd < 0 && errno == ENOENT)
 		goto out;
 
+	pr_debug("youtangai pdf: %d\n", pdf);
 	parent = xmalloc(sizeof(*parent));
 	if (!parent)
 		goto err_cl;
@@ -612,6 +614,7 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	ret = open_page_read_at(pfd, id, parent, pr_flags);
 	if (ret < 0)
 		goto err_free;
+	pr_debug("youtangai done open page read at in try open parent\n");
 
 	if (!ret) {
 		xfree(parent);
