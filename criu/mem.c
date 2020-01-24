@@ -1158,6 +1158,7 @@ static int maybe_disable_thp(struct pstree_item *t, struct page_read *pr)
 
 int prepare_mappings(struct pstree_item *t)
 {
+	pr_debug("into prepare_mapping youtangai\n");
 	int ret = 0;
 	void *addr;
 	struct vm_area_list *vmas;
