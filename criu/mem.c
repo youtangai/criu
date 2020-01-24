@@ -1192,6 +1192,8 @@ int prepare_mappings(struct pstree_item *t)
 	if (ret <= 0)
 		return -1;
 
+	pr_debug("youtangai done open page read\n");
+
 	if (maybe_disable_thp(t, &pr))
 		return -1;
 
@@ -1200,12 +1202,14 @@ int prepare_mappings(struct pstree_item *t)
 	ret = premap_priv_vmas(t, vmas, &addr, &pr);
 	if (ret < 0)
 		goto out;
+	pr_debug("youtangai premap priv vmas\n");
 
 	pr.reset(&pr);
 
 	ret = restore_priv_vma_content(t, &pr);
 	if (ret < 0)
 		goto out;
+	pr_debug("youtangai restore priv vma content\n");
 
 	if (old_premmapped_addr) {
 		ret = munmap(old_premmapped_addr, old_premmapped_len);
@@ -1213,6 +1217,7 @@ int prepare_mappings(struct pstree_item *t)
 			pr_perror("Unable to unmap %p(%lx)",
 					old_premmapped_addr, old_premmapped_len);
 	}
+	pr_debug("youtangai unmaped\n");
 
 	/*
 	 * Not all VMAs were premmaped. Find out the unused tail of the
@@ -1230,6 +1235,7 @@ int prepare_mappings(struct pstree_item *t)
 		pr_info("Shrunk premap area to %p(%lx)\n",
 				rsti(t)->premmapped_addr, rsti(t)->premmapped_len);
 	}
+	pr_debug("youtangai unused tail\n");
 
 out:
 	return ret;
