@@ -1170,6 +1170,8 @@ int prepare_mappings(struct pstree_item *t)
 	vmas = &rsti(t)->vmas;
 	if (vmas->nr == 0) /* Zombie */
 		goto out;
+	
+	pr_debug("youtangai get vmas\n");
 
 	/* Reserve a place for mapping private vma-s one by one */
 	addr = mmap(NULL, vmas->rst_priv_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
@@ -1178,6 +1180,8 @@ int prepare_mappings(struct pstree_item *t)
 		pr_perror("Unable to reserve memory (%lu bytes)", vmas->rst_priv_size);
 		goto out;
 	}
+
+	pr_debug("youtangai reserve mmap\n");
 
 	old_premmapped_addr = rsti(t)->premmapped_addr;
 	old_premmapped_len = rsti(t)->premmapped_len;
