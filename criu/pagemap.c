@@ -603,11 +603,10 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	struct page_read *parent = NULL;
 
 	pfd = openat(dfd, CR_PARENT_LINK, O_RDONLY);
-	if (pfd < 0 && errno == ENOENT) {
-		pr_debug("youtangai errno is %d\n", errno);
+	if (pfd < 0 && errno == ENOENT)
 		goto out;
-	}
-
+	
+	pr_debug("youtangai errno is %d\n", errno);
 	pr_debug("youtangai pfd: %d\n", pfd);
 	parent = xmalloc(sizeof(*parent));
 	if (!parent)
