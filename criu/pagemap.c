@@ -606,7 +606,7 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	if (pfd < 0 && errno == ENOENT)
 		goto out;
 
-	pr_debug("youtangai pdf: %d\n", pdf);
+	pr_debug("youtangai pfd: %d\n", pfd);
 	parent = xmalloc(sizeof(*parent));
 	if (!parent)
 		goto err_cl;
