@@ -1158,7 +1158,7 @@ static int maybe_disable_thp(struct pstree_item *t, struct page_read *pr)
 
 int prepare_mappings(struct pstree_item *t)
 {
-	pr_debug("into prepare_mapping youtangai\n");
+	//pr_debug("into prepare_mapping youtangai\n");
 	int ret = 0;
 	void *addr;
 	struct vm_area_list *vmas;
@@ -1171,7 +1171,7 @@ int prepare_mappings(struct pstree_item *t)
 	if (vmas->nr == 0) /* Zombie */
 		goto out;
 	
-	pr_debug("youtangai get vmas\n");
+	//pr_debug("youtangai get vmas\n");
 
 	/* Reserve a place for mapping private vma-s one by one */
 	addr = mmap(NULL, vmas->rst_priv_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
@@ -1181,7 +1181,7 @@ int prepare_mappings(struct pstree_item *t)
 		goto out;
 	}
 
-	pr_debug("youtangai reserve mmap\n");
+	//pr_debug("youtangai reserve mmap\n");
 
 	old_premmapped_addr = rsti(t)->premmapped_addr;
 	old_premmapped_len = rsti(t)->premmapped_len;
@@ -1192,7 +1192,7 @@ int prepare_mappings(struct pstree_item *t)
 	if (ret <= 0)
 		return -1;
 
-	pr_debug("youtangai done open page read\n");
+	//pr_debug("youtangai done open page read\n");
 
 	if (maybe_disable_thp(t, &pr))
 		return -1;
@@ -1202,14 +1202,14 @@ int prepare_mappings(struct pstree_item *t)
 	ret = premap_priv_vmas(t, vmas, &addr, &pr);
 	if (ret < 0)
 		goto out;
-	pr_debug("youtangai premap priv vmas\n");
+	//pr_debug("youtangai premap priv vmas\n");
 
 	pr.reset(&pr);
 
 	ret = restore_priv_vma_content(t, &pr);
 	if (ret < 0)
 		goto out;
-	pr_debug("youtangai restore priv vma content\n");
+	//pr_debug("youtangai restore priv vma content\n");
 
 	if (old_premmapped_addr) {
 		ret = munmap(old_premmapped_addr, old_premmapped_len);
@@ -1217,7 +1217,7 @@ int prepare_mappings(struct pstree_item *t)
 			pr_perror("Unable to unmap %p(%lx)",
 					old_premmapped_addr, old_premmapped_len);
 	}
-	pr_debug("youtangai unmaped\n");
+	//pr_debug("youtangai unmaped\n");
 
 	/*
 	 * Not all VMAs were premmaped. Find out the unused tail of the
@@ -1235,7 +1235,7 @@ int prepare_mappings(struct pstree_item *t)
 		pr_info("Shrunk premap area to %p(%lx)\n",
 				rsti(t)->premmapped_addr, rsti(t)->premmapped_len);
 	}
-	pr_debug("youtangai unused tail\n");
+	//pr_debug("youtangai unused tail\n");
 
 out:
 	return ret;

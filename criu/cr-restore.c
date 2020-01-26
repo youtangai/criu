@@ -1433,8 +1433,8 @@ static void sigchld_handler(int signal, siginfo_t *siginfo, void *data)
 
 	while (1) {
 		pid = waitpid(-1, &status, WNOHANG);
-		pr_info("youtangai: pid=%d\n", pid);
-		pr_info("youtangai: WEXITSTATUS %d, WIFCONTINUED %d, WIFEXITED %d, WIFSIGNALED %d, WIFSTOPPED %d, WSTOPSIG %d, WTERMSIG %d\n", WEXITSTATUS(status), WIFCONTINUED(status), WIFEXITED(status), WIFSIGNALED(status), WIFSTOPPED(status), WSTOPSIG(status), WTERMSIG(status));
+		//pr_info("youtangai: pid=%d\n", pid);
+		//pr_info("youtangai: WEXITSTATUS %d, WIFCONTINUED %d, WIFEXITED %d, WIFSIGNALED %d, WIFSTOPPED %d, WSTOPSIG %d, WTERMSIG %d\n", WEXITSTATUS(status), WIFCONTINUED(status), WIFEXITED(status), WIFSIGNALED(status), WIFSTOPPED(status), WSTOPSIG(status), WTERMSIG(status));
 
 		if (pid <= 0)
 			return;

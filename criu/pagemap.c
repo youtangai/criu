@@ -598,7 +598,7 @@ static void reset_pagemap(struct page_read *pr)
 
 static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int pr_flags)
 {
-	pr_debug("youtangai into try open parent\n");
+	//pr_debug("youtangai into try open parent\n");
 	int pfd, ret;
 	struct page_read *parent = NULL;
 
@@ -606,8 +606,8 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	if (pfd < 0 && errno == ENOENT)
 		goto out;
 	
-	pr_debug("youtangai errno is %d\n", errno);
-	pr_debug("youtangai pfd: %d\n", pfd);
+	//pr_debug("youtangai errno is %d\n", errno);
+	//pr_debug("youtangai pfd: %d\n", pfd);
 	parent = xmalloc(sizeof(*parent));
 	if (!parent)
 		goto err_cl;
@@ -615,7 +615,7 @@ static int try_open_parent(int dfd, unsigned long id, struct page_read *pr, int 
 	ret = open_page_read_at(pfd, id, parent, pr_flags);
 	if (ret < 0)
 		goto err_free;
-	pr_debug("youtangai done open page read at in try open parent\n");
+	//pr_debug("youtangai done open page read at in try open parent\n");
 
 	if (!ret) {
 		xfree(parent);
@@ -709,7 +709,7 @@ free_pagemaps:
 
 int open_page_read_at(int dfd, unsigned long img_id, struct page_read *pr, int pr_flags)
 {
-	pr_debug("youtangai dfd: %d, img_id: %ld, pr_flags: %d\n", dfd, img_id, pr_flags);
+	//pr_debug("youtangai dfd: %d, img_id: %ld, pr_flags: %d\n", dfd, img_id, pr_flags);
 	int flags, i_typ;
 	static unsigned ids = 1;
 	bool remote = pr_flags & PR_REMOTE;
@@ -751,32 +751,32 @@ int open_page_read_at(int dfd, unsigned long img_id, struct page_read *pr, int p
 	pr->pmi = open_image_at(dfd, i_typ, O_RSTR, img_id);
 	if (!pr->pmi)
 		return -1;
-	pr_debug("youtangai open image ad\n");
+	//pr_debug("youtangai open image ad\n");
 
 	if (empty_image(pr->pmi)) {
 		close_image(pr->pmi);
 		return 0;
 	}
-	pr_debug("youtangai empty images\n");
+	//pr_debug("youtangai empty images\n");
 
 	if (try_open_parent(dfd, img_id, pr, pr_flags)) {
 		close_image(pr->pmi);
 		return -1;
 	}
-	pr_debug("youtangai try open parent\n");
+	//pr_debug("youtangai try open parent\n");
 
 	pr->pi = open_pages_image_at(dfd, flags, pr->pmi, &pr->pages_img_id);
 	if (!pr->pi) {
 		close_page_read(pr);
 		return -1;
 	}
-	pr_debug("youtangai open pages image ad\n");
+	//pr_debug("youtangai open pages image ad\n");
 
 	if (init_pagemaps(pr)) {
 		close_page_read(pr);
 		return -1;
 	}
-	pr_debug("youtangai init page maps\n");
+	//pr_debug("youtangai init page maps\n");
 
 	pr->read_pages = read_pagemap_page;
 	pr->advance = advance;
